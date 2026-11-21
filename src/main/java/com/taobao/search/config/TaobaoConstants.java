@@ -23,9 +23,11 @@ public class TaobaoConstants {
     public static final String API_IMAGE_SEARCH_VERSION = "1.0";
 
     // ===== 应用身份 =====
-    // 这类数字 appKey 在 mtopsdk 里普遍存在；实际以真机抓包为准，可用配置文件覆盖。
-    public static final String APP_KEY = "12574478";           // 淘宝 H5 常用 appKey
-    public static final String APP_KEY_ALT = "99807463";       // smali 中出现频次较高的候选
+    // appKey 证据：smali com/taobao/tao/util/GetAppKeyFromSecurity.getAppKey(0) 直接返回
+    public static final String APP_KEY = "21646297";
+    public static final String APP_KEY_ALT = "12574478";       // H5 页面场景候选
+    public static final String APP_VERSION = "10.68.0";        // smali MtopInitializer 上下文
+    public static final String SG_SDK_VERSION = "6.8.261102";  // libsgmainso.version.so 原文
     public static final String TTID = "taobao@android_10.28.0";
     public static final String API_TYPE_JSON = "json";
 

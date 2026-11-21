@@ -54,11 +54,26 @@ public class SignerRouter {
                     return h5Signer.sign(api, version, appKey, t, data, token, cookie);
                 case "rpc":
                     return rpcSigner.sign(api, version, appKey, t, data, token, cookie);
-                case "unidbg":
+                case "unidbg": {
                     if (unidbgSigner == null) {
                         throw new IllegalStateException("unidbg 后端未启用 (unidbg.enabled=false)");
                     }
-                    return unidbgSigner.sign(api, version, appKey, t, data, token, cookie);
+                    // 联合签名：
+                    //   1) unidbg(真实 libsgmainso) 产出真机四头 x-sign/x-mini-wua/x-sgext/x-umt
+                    //   2) 叠加 H5 MD5 sign（token 有效时）——过 H5 网关校验
+                    // 两者协议不同源：native x-sign 是 App 网关协议，H5 sign 是 query 校验
+                    Map<String, String> nativeHeaders = unidbgSigner.sign(api, version, appKey, t, data);
+                    try {
+                        Map<String, String> h5 = h5Signer.sign(api, version, appKey, t, data, token, cookie);
+                        String md5 = h5.get("sign");
+                        if (md5 != null && !md5.isEmpty()) nativeHeaders.put("sign", md5);
+                        nativeHeaders.put("_h5_sign", "present");
+                    } catch (Exception e) {
+                        nativeHeaders.put("_h5_sign", "absent: " + e.getMessage());
+                    }
+                    nativeHeaders.put("_native_headers", String.valueOf(nativeHeaders.size()));
+                    return nativeHeaders;
+                }
                 case "mock":
                 default:
                     return mockSigner.sign(api, version, appKey, t, data, token, cookie);
@@ -78,9 +93,10 @@ public class SignerRouter {
         return normalize(requested);
     }
 
-    /** h5 后端依赖 token 握手，需要触发「拿 token → 重算 sign → 重试」闭环 */
+    /** h5 / unidbg 后端依赖 token 握手（MD5 sign 需要 token），需触发「拿 token → 重算 sign → 重试」闭环 */
     public boolean needsToken(String requested) {
-        return "h5".equals(normalize(requested));
+        String b = normalize(requested);
+        return "h5".equals(b) || "unidbg".equals(b);
     }
 
     public List<String> availableBackends() {

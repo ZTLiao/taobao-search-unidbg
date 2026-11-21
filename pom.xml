@@ -26,6 +26,18 @@
         <fastjson.version>1.2.83</fastjson.version>
     </properties>
 
+    <!-- 统一 JNA 版本：5.7.0 官方 jar 不含 darwin-aarch64 原生库，Apple Silicon 上 dlopen 必败；
+         5.10.0 自带 darwin-aarch64/libjnidispatch.jnilib，且与 unidbg 编译期 JNA 5.x API 兼容 -->
+    <dependencyManagement>
+        <dependencies>
+            <dependency>
+                <groupId>net.java.dev.jna</groupId>
+                <artifactId>jna</artifactId>
+                <version>5.10.0</version>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+
     <dependencies>
         <dependency>
             <groupId>org.springframework.boot</groupId>
