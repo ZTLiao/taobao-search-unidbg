@@ -13,10 +13,17 @@ public class TaobaoConstants {
     public static final String MTOP_GATEWAY = "https://h5api.m.taobao.com/h5/";
     public static final String MTOP_GATEWAY_WAP = "https://h5.m.taobao.com/h5/";
 
-    // ===== 文本搜索 (mtop.taobao.wsearch.appsearch) =====
+    // ===== 文本搜索 =====
+    // 老接口（H5/mock 场景；服务端已把未登录请求引导到登录墙）
     public static final String API_TEXT_SEARCH = "mtop.taobao.wsearch.appsearch";
     public static final String API_TEXT_SEARCH_VERSION = "1.0";
     public static final String API_TEXT_SUGGEST = "mtop.taobao.wsearch.suggest";
+    // 真机 10.69.10 统一搜索页实际调用的接口（Frida hook buildParams 实测）：
+    // mtop.relationrecommend.MtopRecommend.recommend v1.0，data 带
+    // requestAlias=wsearch / isEnterSrpSearch=true / q=关键词 / appId=66 / n=每页数
+    // ——这是未登录也能返回商品列表的接口，app 协议应走此接口。
+    public static final String API_TEXT_SEARCH_NATIVE = "mtop.relationrecommend.MtopRecommend.recommend";
+    public static final String API_TEXT_SEARCH_NATIVE_VERSION = "1.0";
 
     // ===== 图片搜索/拍立淘 (mtop.relationrecommend.PailitaoRecommend.recommend) =====
     public static final String API_IMAGE_SEARCH = "mtop.relationrecommend.PailitaoRecommend.recommend";

@@ -1930,8 +1930,13 @@
               var name = namePtr.readUtf8String();
               if (name === "doCommandNative") {
                 hookedFn = fnPtr;
+                // 暴露给后续加载的 rpc_sign.js，避免重复等待 RegisterNatives。
+                globalThis.__sgDoCommandNative = fnPtr;
+                globalThis.__sgRegisterNativesEnv = args[0];
                 console.log(TAG + " captured doCommandNative fnPtr=" + fnPtr);
-                installDump(fnPtr);
+                // rpc_sign.js 会在 native 入口用更轻量的 JNI 读取抓 70102 参数；
+                // 这里不再做 Java toString，避免启动阶段 JNI 回调拖慢/卡住 App。
+                // installDump(fnPtr);
               }
             }
           }

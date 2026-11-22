@@ -1,0 +1,14 @@
+{
+  "netHeaders": {
+    "error": "尚未抓到网络层 MTOP 请求头，请先触发一次 App 搜索",
+    "netHeaderCount": 0
+  },
+  "headerCapture": {
+    "error": "尚未抓到请求头",
+    "count": 0
+  },
+  "buildParamsOut": {
+    "error": "尚未捕获 buildParams 返回"
+  },
+  "responses": []
+}

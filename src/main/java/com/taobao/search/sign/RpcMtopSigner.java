@@ -41,6 +41,15 @@ public class RpcMtopSigner implements MtopSigner {
     @Value("${sign.rpc.timeout-ms:5000}")
     private int timeoutMs;
 
+    /** 真机 RPC 后端可回传设备身份；开启后自动同步给请求侧，保证签名与请求头 utdid/deviceId 一致 */
+    @Value("${sign.rpc.sync-device:true}")
+    private boolean syncDevice;
+
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private com.taobao.search.service.HumanBehaviorSimulator human;
+
+    private volatile boolean deviceSynced;
+
     @Override
     public String backend() { return "rpc"; }
 
@@ -52,6 +61,12 @@ public class RpcMtopSigner implements MtopSigner {
     @Override
     public Map<String, String> sign(String api, String version, String appKey, long t,
                                     String data, String token, String cookie) {
+        return sign(api, version, appKey, t, data, token, cookie, null);
+    }
+
+    @Override
+    public Map<String, String> sign(String api, String version, String appKey, long t,
+                                    String data, String token, String cookie, SignContext ctx) {
         if (url == null || url.trim().isEmpty()) {
             throw new IllegalStateException("sign.rpc.url 未配置：请指向自建的 unidbg-server / 真机签名服务");
         }
@@ -63,6 +78,18 @@ public class RpcMtopSigner implements MtopSigner {
         body.put("data", data);
         if (token != null) body.put("token", token);
         if (cookie != null) body.put("cookie", cookie);
+        // 真机 RPC 需要设备上下文：把 SignContext 与按真机 22 段格式拼好的 INPUT 一并透传，
+        // 由签名服务用真机 signRequest 对同一 INPUT 签名，避免签名 payload 与请求头 utdid 不一致。
+        if (ctx != null) {
+            Map<String, String> c = new LinkedHashMap<String, String>();
+            c.put("utdid", ctx.getUtdid());
+            c.put("deviceId", ctx.getDeviceId());
+            c.put("sid", ctx.getSid());
+            c.put("xFeatures", ctx.getXFeatures());
+            body.put("ctx", c);
+            body.put("input", ctx.buildInput(appKey, md5(data), t, api, version));
+        }
+        if (syncDevice && !deviceSynced) syncRemoteDevice();
 
         HttpURLConnection conn = null;
         try {
@@ -92,7 +119,14 @@ public class RpcMtopSigner implements MtopSigner {
             String raw = new String(bos.toByteArray(), "UTF-8");
             JSONObject jo = JSON.parseObject(raw);
             if (jo == null) throw new IllegalStateException("签名服务返回非 JSON: " + raw);
-            JSONObject payload = jo.getJSONObject("data") != null ? jo.getJSONObject("data") : jo;
+            // 只有当 data 值是真正的 JSONObject 时才展开；真机桥接会把「搜索 data」原样回显为
+            // 字符串（合法 JSON 文本），fastjson 的 getJSONObject 会隐式把它解析成对象，
+            // 导致 payload 被错当成搜索参数、丢失 sign/x-* 字段。先判定类型再决定是否展开。
+            JSONObject payload = jo;
+            Object dataVal = jo.get("data");
+            if (dataVal instanceof JSONObject) {
+                payload = (JSONObject) dataVal;
+            }
 
             Map<String, String> r = new LinkedHashMap<String, String>();
             for (Map.Entry<String, Object> e : payload.entrySet()) {
@@ -104,6 +138,7 @@ public class RpcMtopSigner implements MtopSigner {
                 }
             }
             if (r.isEmpty()) throw new IllegalStateException("签名服务未返回有效签名字段: " + raw);
+            if (jo.getString("_rpc_backend") != null) r.put("_rpc_backend", jo.getString("_rpc_backend"));
             r.put("_rpc", url);
             return r;
         } catch (Exception e) {
@@ -111,6 +146,49 @@ public class RpcMtopSigner implements MtopSigner {
             throw new RuntimeException("RPC 签名失败: " + e.getMessage(), e);
         } finally {
             if (conn != null) conn.disconnect();
+        }
+    }
+
+    /** 从签名服务的 /device 拉取真机身份，避免伪造 utdid 与真机签名内嵌设备不一致 */
+    private void syncRemoteDevice() {
+        deviceSynced = true; // 只尝试一次，失败不阻塞签名
+        if (human == null || url == null || url.trim().isEmpty()) return;
+        try {
+            java.net.URI u = new java.net.URI(url);
+            String deviceUrl = u.getScheme() + "://" + u.getHost() + ":" + u.getPort() + "/device";
+            HttpURLConnection conn = (HttpURLConnection) new URL(deviceUrl).openConnection();
+            conn.setConnectTimeout(timeoutMs);
+            conn.setReadTimeout(timeoutMs);
+            int code = conn.getResponseCode();
+            InputStream is = code >= 400 ? conn.getErrorStream() : conn.getInputStream();
+            ByteArrayOutputStream bos = new ByteArrayOutputStream();
+            if (is != null) {
+                byte[] buf = new byte[2048];
+                int n;
+                while ((n = is.read(buf)) != -1) bos.write(buf, 0, n);
+                is.close();
+            }
+            JSONObject d = JSON.parseObject(new String(bos.toByteArray(), "UTF-8"));
+            conn.disconnect();
+            if (d == null) return;
+            human.adoptRemoteDevice(
+                    d.getString("utdid"), d.getString("deviceId"), d.getString("sid"),
+                    d.getString("umt"), d.getString("ttid"));
+            log.info("已从真机 RPC 同步设备身份: utdid={} ttid={}", d.getString("utdid"), d.getString("ttid"));
+        } catch (Exception e) {
+            log.warn("同步真机设备身份失败（可手动配置 mtop.utdid/device-id/umt）: {}", e.getMessage());
+        }
+    }
+
+    private static String md5(String s) {
+        try {
+            byte[] b = java.security.MessageDigest.getInstance("MD5")
+                    .digest((s == null ? "" : s).getBytes("UTF-8"));
+            StringBuilder sb = new StringBuilder(b.length * 2);
+            for (byte x : b) sb.append(String.format("%02x", x & 0xff));
+            return sb.toString();
+        } catch (Exception e) {
+            return "";
         }
     }
 }

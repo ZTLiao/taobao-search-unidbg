@@ -1,5 +1,6 @@
 package com.taobao.search.service;
 
+import com.alibaba.fastjson.JSON;
 import com.taobao.search.config.TaobaoConstants;
 import com.taobao.search.model.ApiResponse;
 import com.taobao.search.model.ImageSearchRequest;
@@ -33,6 +34,13 @@ public class ImageSearchService {
     @Autowired
     private MtopHttpClient mtop;
 
+    @Autowired(required = false)
+    private NativeSearchClient nativeSearch;
+
+    /** 协议模式：native=App 原生 anetwork 栈 + 游客态（免登录）；h5/app=手工 HTTP form */
+    @Value("${mtop.protocol:h5}")
+    private String protocol;
+
     /** 允许读取的本地图片根目录，防止 imagePath 被用作任意文件读取。 */
     @Value("${image.allowed-dir:/tmp/tb_img}")
     private String allowedDir;
@@ -42,6 +50,11 @@ public class ImageSearchService {
         if (biz == null) {
             return ApiResponse.fail(TaobaoConstants.API_IMAGE_SEARCH, "local",
                     "需要提供 imageBase64 / imageUrl / imagePath 之一");
+        }
+        String data = JSON.toJSONString(biz);
+        if ("native".equalsIgnoreCase(protocol) && nativeSearch != null && nativeSearch.isConfigured()) {
+            return nativeSearch.search(TaobaoConstants.API_IMAGE_SEARCH,
+                    TaobaoConstants.API_IMAGE_SEARCH_VERSION, data, "POST");
         }
         return mtop.call(TaobaoConstants.API_IMAGE_SEARCH,
                 TaobaoConstants.API_IMAGE_SEARCH_VERSION,
@@ -81,7 +94,14 @@ public class ImageSearchService {
         p.put("pssource", "sy");
         p.put("extraParams",
                 "use_multi_cat:1;use_pid_summary:1;cat_deleted:1;use_pid_tag:1;extend_count:3");
-        return p;
+
+        // 真机 SDK (ImageSearchMtopUtil.h → tb/pft.c) 与 Frida 实测（HOOK_GUIDE 17.1）：
+        // data 不是平铺，而是外层 {"params":"<内层JSON>","appId":"32969"} 封装。
+        // 平铺结构会让 SecurityGuard 签名 INPUT 与网关期望不匹配 → FAIL_SYS_ILEGEL_SIGN。
+        Map<String, Object> wrapped = new LinkedHashMap<String, Object>();
+        wrapped.put("params", JSON.toJSONString(p));
+        wrapped.put("appId", TaobaoConstants.PLT_APP_ID);
+        return wrapped;
     }
 
     private String stripDataPrefix(String s) {

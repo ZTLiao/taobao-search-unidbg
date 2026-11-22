@@ -43,12 +43,24 @@ public class HumanBehaviorSimulator {
     private String injectedLat;
     @Value("${mtop.lng:}")
     private String injectedLng;
+    /** BYO：真机 umt（umid 设备指纹，base64，随设备固定；未注入则生成占位） */
+    @Value("${mtop.umt:}")
+    private String injectedUmt;
+    /** BYO：真机 x-app-conf-v（真机为 0） */
+    @Value("${mtop.app-conf-v:0}")
+    private String injectedAppConfV;
 
     private volatile String sessionUtdid;
     private volatile String sessionDeviceId;
     private volatile String sessionSid;
     private volatile String sessionLat;
     private volatile String sessionLng;
+    private volatile String sessionUmt;
+    private volatile String sessionAppConfV;
+    /** 真机 ttid（RPC 同步），null 表示未同步、回退到配置值 */
+    private volatile String sessionTtid;
+    /** 真机 UA（RPC 同步），null 表示未同步、回退到模拟器占位 UA */
+    private volatile String sessionAppUa;
     private volatile String sessionUa = UAS[ThreadLocalRandom.current().nextInt(UAS.length)];
 
     @javax.annotation.PostConstruct
@@ -58,6 +70,8 @@ public class HumanBehaviorSimulator {
         sessionSid = injectedSid == null ? "" : injectedSid.trim();
         sessionLat = injectedLat == null ? "" : injectedLat.trim();
         sessionLng = injectedLng == null ? "" : injectedLng.trim();
+        sessionUmt = notEmpty(injectedUmt) ? injectedUmt.trim() : generateUmt();
+        sessionAppConfV = notEmpty(injectedAppConfV) ? injectedAppConfV.trim() : "0";
     }
 
     /** 会话级稳定 utdid（24 位；签名 payload 与 x-utdid 头必须共用此值） */
@@ -73,14 +87,68 @@ public class HumanBehaviorSimulator {
     public String sessionLat() { return sessionLat == null ? "" : sessionLat; }
     public String sessionLng() { return sessionLng == null ? "" : sessionLng; }
 
+    /** umid 设备指纹（真机 base64 值，随设备固定；作为 form 的 umt 与 x-umt 头共用） */
+    public String sessionUmt() { return sessionUmt == null ? "" : sessionUmt; }
+
+    /** x-app-conf-v（真机 10.69.10 为 0） */
+    public String sessionAppConfV() { return sessionAppConfV == null ? "0" : sessionAppConfV; }
+
+    /**
+     * 8 位随机 traceId（真机 x-c-traceid / x-falco-id 形态，如 7fKhyLJS）。
+     * 之前用 utdid+t 是错的——真机是一次请求一随机，且 falco 与 trace 同值。
+     */
+    public String traceId() {
+        byte[] b = new byte[6];
+        ThreadLocalRandom.current().nextBytes(b);
+        return Base64.getUrlEncoder().withoutPadding().encodeToString(b);
+    }
+
+    /** 真机 mtopsdk UA（含机型），app 协议必须使用此形态 */
+    public String appUa() {
+        return notEmpty(sessionAppUa) ? sessionAppUa
+                : "MTOPSDK/3.1.1.7 (Android;15;Google;sdk_gphone64_arm64) DeviceType(Phone)";
+    }
+
     public String randomUtdid() { return generateUtdid(); }
     public String randomDeviceId() { return generateDeviceId(); }
+
+    /**
+     * 采用真机 RPC 签名服务回传的设备身份。
+     * 真机四头内嵌设备运行时特征，若 HTTP 头仍用随机 utdid/deviceId，
+     * 服务端会判定签名与请求不一致；同步后签名与 x-utdid/x-devid/x-umt 全部同源。
+     */
+    public void adoptRemoteDevice(String utdid, String deviceId, String sid, String umt, String ttid) {
+        if (notEmpty(utdid)) sessionUtdid = utdid.trim();
+        if (notEmpty(deviceId)) sessionDeviceId = deviceId.trim();
+        if (sid != null) sessionSid = sid.trim();
+        if (notEmpty(umt)) sessionUmt = umt.trim();
+        // ttid 必须同步：签名 INPUT 第9段、form ttid、搜索 data.ttid 三处必须同源。
+        // 之前不同步导致「真机签名用 10.69 ttid，data 用旧 10.28 ttid」，服务端判定协议不一致。
+        if (notEmpty(ttid)) sessionTtid = ttid.trim();
+        if (notEmpty(ttid)) {
+            // 由 ttid 反推真机 UA（231200@taobao_android_10.69.10 -> Android;13;...10.69.10）
+            sessionAppUa = "MTOPSDK/3.1.1.7 (Android;13;unknown;TrebleDroid vanilla) DeviceType(Phone)";
+        }
+    }
+
+    /** 有效 ttid：RPC 同步到真机值则优先，否则用配置值 */
+    public String effectiveTtid(String configTtid) {
+        return notEmpty(sessionTtid) ? sessionTtid : configTtid;
+    }
 
     /** 显式轮换设备身份（会作废当前 token，需重新握手） */
     public void rotate() {
         sessionUtdid = generateUtdid();
         sessionDeviceId = generateDeviceId();
+        sessionUmt = generateUmt();
         sessionUa = UAS[ThreadLocalRandom.current().nextInt(UAS.length)];
+    }
+
+    /** 32 字符 base64 占位 umt（真机形如 WiUB/mFLPG4qQgKiATYHzKeUIk+Xea2m，24 字节） */
+    private String generateUmt() {
+        byte[] b = new byte[24];
+        ThreadLocalRandom.current().nextBytes(b);
+        return Base64.getEncoder().encodeToString(b).substring(0, 32);
     }
 
     /** 18 字节 -> 24 位 base64url，与真机 utdid 长度一致 */

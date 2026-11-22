@@ -104,6 +104,8 @@ public class MtopHttpClient {
             String utdid = human.sessionUtdid();
             String deviceId = human.sessionDeviceId();
             String sid = human.sessionSid();
+            // rpc 后端会从真机同步设备身份，ttid 必须一起同步，保证签名 INPUT/form/header/data 同源
+            String effTtid = human.effectiveTtid(ttid);
             boolean appMode = "app".equalsIgnoreCase(protocol);
             // token 始终透传给签名后端（h5 用它算 sign，rpc 签名服务可能也需要）；
             // needToken 只决定本客户端是否驱动「拿 token → 重算 sign → 重试」握手闭环
@@ -112,14 +114,15 @@ public class MtopHttpClient {
 
             // 设备身份三要素：签名 payload 与 HTTP 头必须共用同一组值，
             // 否则 native x-sign 校验 utdid/deviceId 不一致 -> FAIL_SYS_ILLEGAL_SIGN
-            SignContext signCtx = new SignContext(utdid, deviceId, sid, "", ttid,
+            SignContext signCtx = new SignContext(utdid, deviceId, sid, "", effTtid,
                     "openappkey=DEFAULT_AUTH", "27", human.sessionLat(), human.sessionLng());
             Map<String, String> sign = signerRouter.sign(api, version, appKey, t, data,
                     backend, token, cookie, signCtx);
             signMeta = extractMeta(sign);
 
             Map<String, String> params = buildParams(api, version, t, data, sign);
-            Map<String, String> headers = human.headers(ttid, utdid);
+            String traceId = human.traceId();
+            Map<String, String> headers = human.headers(effTtid, utdid);
             for (Map.Entry<String, String> e : sign.entrySet()) {
                 if (e.getKey().startsWith("x-")) headers.put(e.getKey(), e.getValue());
             }
@@ -132,20 +135,53 @@ public class MtopHttpClient {
             String url;
             if (appMode) {
                 url = gateway + api + "/" + version + "/";
-                headers.put("User-Agent", "MTOPSDK/3.1.1.7 (Android;10;Xiaomi;MI 9)");
+                // 真机 mtopsdk UA（hook 实测值，含机型），旧的 Xiaomi/MI 9 已过时
+                headers.put("User-Agent", human.appUa());
                 headers.remove("Referer");
                 headers.remove("Origin");
                 headers.remove("x-requested-with");
                 headers.remove("ttid");
                 headers.remove("utd_id");
+                headers.remove("Accept-Language");
+                headers.remove("Cache-Control");
+                // 真机完整头族（Frida hook InnerProtocolParamBuilderImpl.buildParams 实测）：
+                //   x-t / x-app-ver / x-features / x-app-conf-v / x-c-traceid / x-falco-id
+                //   x-page-url / x-page-name / f-refer / netType / nq / umt
                 headers.put("x-t", String.valueOf(t));
                 headers.put("x-app-ver", appVersion);
-                // 注意：实测 x-pv 头会触发 FAIL_SYS_PROTOPARAM_MISSED，不能携带
                 headers.put("x-features", "27");
+                headers.put("x-app-conf-v", human.sessionAppConfV());
+                headers.put("x-c-traceid", traceId);
+                headers.put("x-falco-id", traceId);
+                headers.put("x-page-url", "taobao://s.taobao.com/search");
+                headers.put("x-page-name", "com.taobao.search.uniform.SearchActivity");
+                headers.put("f-refer", "mtop");
+                headers.put("netType", "HSPA");
+                headers.put("nq", "3G");
+                headers.put("umt", human.sessionUmt());
                 headers.put("x-utdid", utdid);
                 headers.put("x-devid", deviceId);
                 if (sid != null && !sid.isEmpty()) headers.put("x-sid", sid);
-                headers.put("x-c-traceid", utdid + t);
+                // 注意：实测 x-pv 头会触发 FAIL_SYS_PROTOPARAM_MISSED，不能携带
+                //
+                // ===== m-* 新协议头族（2026-11-22 真机对照实验决定性发现）=====
+                // 缺 m-pv 时网关稳定返回 FAIL_SYS_PROTOVER_MISSED::缺少协议版本m-pv，
+                // 签名再真也过不了这一层。m-* 头族是独立于 x-sign 的强制性协议门槛：
+                //   m-pv      协议版本，值不敏感（6.3/8.1.0/10.0.0 均通过完整性校验）
+                //   m-appkey  应用 key，与 form.appKey 一致
+                //   m-sign    内容不敏感（实测 x-sign/任意串/空值均可过协议层；
+                //             服务端在 m-t 有效期内不校验其内容，故无需逆向新算法）
+                //   m-t       必须是「当前秒级时间戳」——这是关键！固定值(如1)会
+                //             触发 FAIL_SYS_REQUEST_EXPIRED；±120s 内均接受。
+                // 带齐且 m-t=t 后，协议层被突破，直接落到 FAIL_SYS_USER_VALIDATE
+                // (bx-action=login) —— 即登录态层，与真机 UI 搜索卡在同一关。
+                String mSign = pickSign(sign);
+                if (mSign == null || mSign.isEmpty()) mSign = String.valueOf(t);
+                headers.put("m-pv", "8.1.0");
+                headers.put("m-appkey", appKey);
+                headers.put("m-sign", mSign);
+                headers.put("m-t", String.valueOf(t));
+                log.debug("[{}] m-* 协议头族已附加 m-pv=8.1.0 m-t={}", api, t);
             } else {
                 url = gateway + api + "/" + version + "/?" + encode(params);
             }
@@ -204,14 +240,29 @@ public class MtopHttpClient {
         p.put("v", version);
         p.put("type", TaobaoConstants.API_TYPE_JSON);
         p.put("dataType", TaobaoConstants.API_TYPE_JSON);
-        p.put("ttid", ttid);
+        p.put("ttid", human.effectiveTtid(ttid));
         p.put("data", data);
         if ("app".equalsIgnoreCase(protocol)) {
+            // 真机 InnerProtocolParamBuilderImpl.buildParams 实测公共参数（未登录场景）：
+            //   appKey=21646297, utdid(24), deviceId/sid/uid=null(未登录但仍在 form 中),
+            //   umt(umid 设备指纹), extdata=openappkey=DEFAULT_AUTH, x-features=27,
+            //   x-app-conf-v=0, netType=HSPA, nq=3G, f-refer=mtop, x-app-ver,
+            //   x-page-url / x-page-name（场景标识）
+            p.put("appKey", appKey);
             p.put("utdid", human.sessionUtdid());
-            p.put("uid", "");
+            p.put("deviceId", "");
             p.put("sid", "");
-            p.put("cre", "");
-            p.put("alexa", "0");
+            p.put("uid", "");
+            p.put("umt", human.sessionUmt());
+            p.put("extdata", "openappkey=DEFAULT_AUTH");
+            p.put("x-features", "27");
+            p.put("x-app-conf-v", human.sessionAppConfV());
+            p.put("x-app-ver", appVersion);
+            p.put("netType", "HSPA");
+            p.put("nq", "3G");
+            p.put("f-refer", "mtop");
+            p.put("x-page-url", "taobao://s.taobao.com/search");
+            p.put("x-page-name", "com.taobao.search.uniform.SearchActivity");
         }
         return p;
     }
@@ -238,7 +289,7 @@ public class MtopHttpClient {
         Map<String, String> params = buildParams(api, version, t, "{}", sign);
         String url = gateway + api + "/" + version + "/"
                 + ("app".equalsIgnoreCase(protocol) ? "" : "?" + encode(params));
-        RawResponse rr = post(url, human.headers(ttid, utdid), encode(params));
+        RawResponse rr = post(url, human.headers(human.effectiveTtid(ttid), utdid), encode(params));
         boolean ok = tokenManager.absorb(rr.setCookies);
         log.info("probeHandshake tokenUpdated={}", ok);
     }

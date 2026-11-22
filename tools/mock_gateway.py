@@ -106,6 +106,15 @@ class Handler(BaseHTTPRequestHandler):
         if "PailitaoRecommend" in api:
             try:
                 biz = json.loads(data)
+                # 真机 SDK 形态：外层 {"params":"<内层JSON>","appId":"32969"}
+                # 兼容平铺结构（旧链路）与外层封装（HOOK_GUIDE 17.1 修正后）
+                if "params" in biz and isinstance(biz.get("params"), str):
+                    try:
+                        inner = json.loads(biz["params"])
+                        if isinstance(inner, dict):
+                            biz = inner
+                    except Exception:
+                        pass
                 strimg = biz.get("strimg") or ""
                 searchimg = biz.get("searchimg") or ""
                 if strimg:
