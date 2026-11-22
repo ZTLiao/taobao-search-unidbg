@@ -56,10 +56,11 @@ def main():
     args = ap.parse_args()
     utdid = "".join(__import__("random").choice("abcdefghijklmnopqrstuvwxyz0123456789") for _ in range(24))
     t = int(time.time())
-    # smssend 参数：loginId(手机号) countryCode scene source
+    # smssend 真实参数（反编译 SMSLoginRequest + LoginComponent）：
+    #   nick=手机号  phoneCode=国家码  countryCode=86  codeLength=6  sdkTraceId
     data = json.dumps({
-        "loginId": args.phone, "countryCode": "86",
-        "scene": "login", "source": "taobao", "codeLength": "6",
+        "nick": args.phone, "phoneCode": "86", "countryCode": "86",
+        "codeLength": "6", "sdkTraceId": "sms_probe_%d" % int(time.time()),
     }, ensure_ascii=False, separators=(",", ":"))
     print("[*] api=%s phone=%s" % (args.api, args.phone))
     print("[*] data=%s" % data)
