@@ -32,6 +32,10 @@ public class TaobaoJni extends AbstractJni {
                 return DvmLong.valueOf(vm, vaList.getLongArg(0));
             case "java/lang/Boolean-><init>(Z)V":
                 return DvmBoolean.valueOf(vm, vaList.getIntArg(0) != 0);
+            case "java/util/HashMap-><init>()V":
+            case "java/util/HashMap-><init>(I)V":
+                // 70102 结果容器：value 持有真实 Map，后续 put/最终返回都走该对象
+                return vm.resolveClass("java/util/HashMap").newObject(new java.util.LinkedHashMap<String, Object>());
             default:
                 return super.newObjectV(vm, dvmClass, signature, vaList);
         }
@@ -48,6 +52,10 @@ public class TaobaoJni extends AbstractJni {
                 return DvmLong.valueOf(vm, varArg.getLongArg(0));
             case "java/lang/Boolean-><init>(Z)V":
                 return DvmBoolean.valueOf(vm, varArg.getIntArg(0) != 0);
+            case "java/util/HashMap-><init>()V":
+            case "java/util/HashMap-><init>(I)V":
+                // 70102 结果容器：value 持有真实 Map，后续 put/最终返回都走该对象
+                return vm.resolveClass("java/util/HashMap").newObject(new java.util.LinkedHashMap<String, Object>());
             default:
                 return super.newObject(vm, dvmClass, signature, varArg);
         }
@@ -96,10 +104,12 @@ public class TaobaoJni extends AbstractJni {
                 || signature.contains("Plugin->getMainPluginClassLoader()Ljava/lang/ClassLoader;")) {
             return vm.resolveClass("java/lang/ClassLoader").newObject(null);
         }
-        // 通用单例获取：xxx->getInstance()Lxxx; 返回该类实例
+        // 通用单例获取：xxx->getInstance()Lxxx; 返回该类实例。
+        // 修复原有 &&/|| 优先级 bug：原写法 (idx>0 && endsWith) || contains 使条件恒真，
+        // 且 idx==0 时 substring(0,0) 得到空类名导致 resolveClass 崩溃。
         int idx = signature.indexOf("->getInstance()");
-        if (idx > 0 && signature.endsWith("Lcom/taobao/dp/util/CallbackHelper;")
-                || signature.contains("->getInstance()")) {
+        if (idx > 0 && (signature.endsWith("Lcom/taobao/dp/util/CallbackHelper;")
+                || signature.contains("->getInstance()"))) {
             String cls = signature.substring(0, idx);
             return vm.resolveClass(cls).newObject(null);
         }
@@ -146,8 +156,10 @@ public class TaobaoJni extends AbstractJni {
             case "com/alibaba/wireless/security/mainplugin/SecurityGuardMainPlugin->getMainPluginClassLoader()Ljava/lang/ClassLoader;":
                 // JNI_OnLoad 首个回调：插件类加载器
                 return vm.resolveClass("java/lang/ClassLoader").newObject(null);
+            // elapsedRealtime 语义是「自开机起的单调毫秒」，不能返回 epoch 墙上时钟。
+            // SO 内用它做计时/超时/反调试判断，返回墙上时钟会得到错误结果。
             case "android/os/SystemClock->elapsedRealtime()J":
-                return DvmLong.valueOf(vm, System.currentTimeMillis());
+                return DvmLong.valueOf(vm, System.nanoTime() / 1_000_000L);
             default:
                 return super.callStaticObjectMethodV(vm, dvmClass, signature, vaList);
         }

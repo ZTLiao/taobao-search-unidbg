@@ -54,6 +54,13 @@
             <artifactId>spring-boot-starter-test</artifactId>
             <scope>test</scope>
         </dependency>
+        <!-- 显式 JUnit4：starter-test 2.6 默认只带 Jupiter，探针/单元测试用 org.junit.Assert -->
+        <dependency>
+            <groupId>junit</groupId>
+            <artifactId>junit</artifactId>
+            <version>4.13.2</version>
+            <scope>test</scope>
+        </dependency>
 
         <!-- 阿里 SecurityGuard 签名走 java 层反射入参，用 fastjson 组包 -->
         <dependency>

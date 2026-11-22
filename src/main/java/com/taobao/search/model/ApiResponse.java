@@ -24,6 +24,7 @@ public class ApiResponse {
     private String tokenState;          // none / handshake / injected
     private int attempts;               // 实际请求次数（含握手重试）
     private String hint;                // 面向使用者的可操作提示
+    private String punishUrl;           // 风控验证页 URL（bixi punish，浏览器通过验证后取 x5sec 注入）
     private List<String> handshakeTrail;
     private Map<String, String> signMeta;
 
@@ -71,6 +72,8 @@ public class ApiResponse {
     public String getTokenState() { return tokenState; }
     public int getAttempts() { return attempts; }
     public String getHint() { return hint; }
+    public String getPunishUrl() { return punishUrl; }
+    public void setPunishUrl(String punishUrl) { this.punishUrl = punishUrl; }
     public List<String> getHandshakeTrail() { return handshakeTrail; }
     public Map<String, String> getSignMeta() { return signMeta; }
 }

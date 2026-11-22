@@ -27,4 +27,13 @@ public interface MtopSigner {
                                      String data, String token, String cookie) {
         return sign(api, version, appKey, t, data);
     }
+
+    /**
+     * 带完整设备上下文的签名（native x-sign 用）。
+     * 默认忽略 ctx，委托到带 token 的签名；只有 unidbg / rpc 后端需要真实设备三要素。
+     */
+    default Map<String, String> sign(String api, String version, String appKey, long t,
+                                     String data, String token, String cookie, SignContext ctx) {
+        return sign(api, version, appKey, t, data, token, cookie);
+    }
 }

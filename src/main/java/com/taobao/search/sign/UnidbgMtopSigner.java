@@ -52,13 +52,23 @@ public class UnidbgMtopSigner implements MtopSigner {
 
     @Override
     public Map<String, String> sign(String api, String version, String appKey, long t, String data) {
-        Map<String, String> headers = engine().sign(api, version, data, "r_" + t);
+        // 无上下文时退化为兼容模式（仅链路自检用，生产请走带 SignContext 的重载）
+        return sign(api, version, appKey, t, data, null, null,
+                new SignContext("", "", "", "", "", "", "27", "", ""));
+    }
+
+    @Override
+    public Map<String, String> sign(String api, String version, String appKey, long t,
+                                    String data, String token, String cookie, SignContext ctx) {
+        SignContext c = ctx == null
+                ? new SignContext("", "", "", "", "", "", "27", "", "") : ctx;
+        Map<String, String> headers = engine().sign(api, version, data, "r_" + t, t, c);
         if (headers.isEmpty()) {
             throw new IllegalStateException("unidbg 70102 签名返回空，请查看探针日志");
         }
         Map<String, String> result = new HashMap<String, String>(headers);
-        log.info("unidbg 签名完成 api={} x-sign.len={} sgext.len={} wua.len={}",
-                api,
+        log.info("unidbg 签名完成 api={} utdid.len={} deviceId.len={} x-sign.len={} sgext.len={} wua.len={}",
+                api, c.getUtdid().length(), c.getDeviceId().length(),
                 result.getOrDefault("x-sign", "").length(),
                 result.getOrDefault("x-sgext", "").length(),
                 result.getOrDefault("x-mini-wua", "").length());

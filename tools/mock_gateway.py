@@ -102,6 +102,21 @@ class Handler(BaseHTTPRequestHandler):
 
         # 3) 成功
         COUNTER["success"] += 1
+        # 图片搜索：解析 data(JSON) 里的 strimg/searchimg，实证图片是否真的上传
+        if "PailitaoRecommend" in api:
+            try:
+                biz = json.loads(data)
+                strimg = biz.get("strimg") or ""
+                searchimg = biz.get("searchimg") or ""
+                if strimg:
+                    COUNTER["imageUploads"] = COUNTER.get("imageUploads", 0) + 1
+                    print(f"[req{n}] IMAGE UPLOAD strimg.len={len(strimg)} "
+                          f"prefix={strimg[:16]} region={biz.get('region')}", flush=True)
+                elif searchimg:
+                    COUNTER["imageUploads"] = COUNTER.get("imageUploads", 0) + 1
+                    print(f"[req{n}] IMAGE URL searchimg={searchimg[:80]}", flush=True)
+            except Exception:
+                pass
         resp = {"api": api, "v": g("v", "1.0"),
                 "ret": ["SUCCESS::调用成功"], "data": build_data(api)}
         self._send(resp)

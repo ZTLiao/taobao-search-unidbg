@@ -1,5 +1,6 @@
 package com.taobao.search.service;
 
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 import java.util.Base64;
@@ -11,8 +12,13 @@ import java.util.concurrent.ThreadLocalRandom;
  * 模拟人类操作请求：真实 UA、设备指纹、请求头、时间戳与随机抖动。
  * 这些字段对应 smali 里 ImageSearchMtopUtil.h() / InnerProtocolParamBuilderImpl 注入的公共参数。
  *
- * 注意：utdid 在真机上是设备级固定值。token 与设备/会话绑定，若每次请求都换 utdid
- * 会破坏会话一致性并触发风控，因此这里提供「会话级稳定 utdid」，仅显式 rotate 才更换。
+ * 设备身份三要素（务必与 native 签名 payload 保持严格一致，否则网关判 FAIL_SYS_ILLEGAL_SIGN）：
+ *   - utdid    : 24 位（真机如 XcZJFF61gMADAep76BgfX2AD），对应 x-utdid 头
+ *   - deviceId : 44 位（真机如 AiN8kvbdEkyD1P3CqFhYct1a7PmMab5dj804e192TcrV），对应 x-devid
+ *   - sid      : 32 位会话 id（登录后才有；未登录留空），对应 x-sid
+ *
+ * 这些在真机上是设备级固定值。token/sign 与设备绑定，若每次请求都换 utdid
+ * 会破坏会话一致性并触发风控，因此这里提供「会话级稳定」身份，仅显式 rotate 才更换。
  */
 @Component
 public class HumanBehaviorSimulator {
@@ -26,27 +32,67 @@ public class HumanBehaviorSimulator {
                     + "(KHTML, like Gecko) Mobile/15E148 TaobaoiPhone/10.28.0"
     };
 
-    private volatile String sessionUtdid = generate();
+    /** BYO：可注入自持的合法设备身份（真机抓包值），留空则自动生成 */
+    @Value("${mtop.utdid:}")
+    private String injectedUtdid;
+    @Value("${mtop.device-id:}")
+    private String injectedDeviceId;
+    @Value("${mtop.sid:}")
+    private String injectedSid;
+    @Value("${mtop.lat:}")
+    private String injectedLat;
+    @Value("${mtop.lng:}")
+    private String injectedLng;
+
+    private volatile String sessionUtdid;
+    private volatile String sessionDeviceId;
+    private volatile String sessionSid;
+    private volatile String sessionLat;
+    private volatile String sessionLng;
     private volatile String sessionUa = UAS[ThreadLocalRandom.current().nextInt(UAS.length)];
 
-    /** 会话级稳定 utdid（token 握手期间必须保持一致） */
-    public String sessionUtdid() {
-        return sessionUtdid;
+    @javax.annotation.PostConstruct
+    public void init() {
+        sessionUtdid = notEmpty(injectedUtdid) ? injectedUtdid.trim() : generateUtdid();
+        sessionDeviceId = notEmpty(injectedDeviceId) ? injectedDeviceId.trim() : generateDeviceId();
+        sessionSid = injectedSid == null ? "" : injectedSid.trim();
+        sessionLat = injectedLat == null ? "" : injectedLat.trim();
+        sessionLng = injectedLng == null ? "" : injectedLng.trim();
     }
 
-    /** 生成一个新 utdid（真机上是设备级固定值） */
-    public String randomUtdid() {
-        return generate();
-    }
+    /** 会话级稳定 utdid（24 位；签名 payload 与 x-utdid 头必须共用此值） */
+    public String sessionUtdid() { return sessionUtdid; }
+
+    /** 会话级稳定 deviceId（44 位；签名 payload 与 x-devid 头必须共用此值） */
+    public String sessionDeviceId() { return sessionDeviceId; }
+
+    /** 会话级 sid（32 位，未登录为空；签名 payload 与 x-sid 头必须共用此值） */
+    public String sessionSid() { return sessionSid == null ? "" : sessionSid; }
+
+    /** 经纬度（参与 native INPUT 段11/12；真机通常为定位值，可 BYO 注入） */
+    public String sessionLat() { return sessionLat == null ? "" : sessionLat; }
+    public String sessionLng() { return sessionLng == null ? "" : sessionLng; }
+
+    public String randomUtdid() { return generateUtdid(); }
+    public String randomDeviceId() { return generateDeviceId(); }
 
     /** 显式轮换设备身份（会作废当前 token，需重新握手） */
     public void rotate() {
-        sessionUtdid = generate();
+        sessionUtdid = generateUtdid();
+        sessionDeviceId = generateDeviceId();
         sessionUa = UAS[ThreadLocalRandom.current().nextInt(UAS.length)];
     }
 
-    private String generate() {
-        byte[] b = new byte[12];
+    /** 18 字节 -> 24 位 base64url，与真机 utdid 长度一致 */
+    private String generateUtdid() {
+        byte[] b = new byte[18];
+        ThreadLocalRandom.current().nextBytes(b);
+        return Base64.getUrlEncoder().withoutPadding().encodeToString(b);
+    }
+
+    /** 33 字节 -> 44 位 base64url，与真机 deviceId 长度一致 */
+    private String generateDeviceId() {
+        byte[] b = new byte[33];
         ThreadLocalRandom.current().nextBytes(b);
         return Base64.getUrlEncoder().withoutPadding().encodeToString(b);
     }
@@ -75,4 +121,6 @@ public class HumanBehaviorSimulator {
             Thread.currentThread().interrupt();
         }
     }
+
+    private static boolean notEmpty(String s) { return s != null && !s.trim().isEmpty(); }
 }

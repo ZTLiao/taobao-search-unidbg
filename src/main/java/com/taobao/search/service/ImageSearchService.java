@@ -3,11 +3,15 @@ package com.taobao.search.service;
 import com.taobao.search.config.TaobaoConstants;
 import com.taobao.search.model.ApiResponse;
 import com.taobao.search.model.ImageSearchRequest;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.io.IOException;
 import java.nio.file.Files;
+import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -24,8 +28,14 @@ import java.util.Map;
 @Service
 public class ImageSearchService {
 
+    private static final Logger log = LoggerFactory.getLogger(ImageSearchService.class);
+
     @Autowired
     private MtopHttpClient mtop;
+
+    /** 允许读取的本地图片根目录，防止 imagePath 被用作任意文件读取。 */
+    @Value("${image.allowed-dir:/tmp/tb_img}")
+    private String allowedDir;
 
     public ApiResponse search(ImageSearchRequest req) {
         Map<String, Object> biz = buildParams(req);
@@ -82,9 +92,26 @@ public class ImageSearchService {
 
     private String encodeFile(String path) {
         try {
-            byte[] bytes = Files.readAllBytes(Paths.get(path));
+            Path base = Paths.get(allowedDir).toRealPath();
+            Path target = Paths.get(path).toRealPath();
+            // 安全：真实路径必须位于白名单目录内，拒绝 ../ 与绝对路径越界（如 /etc/shadow）。
+            if (!target.startsWith(base)) {
+                log.warn("拒绝越界图片路径 path={} base={}", path, base);
+                return null;
+            }
+            if (!Files.isRegularFile(target)) {
+                log.warn("非普通文件，拒绝 path={}", path);
+                return null;
+            }
+            long size = Files.size(target);
+            if (size > 10L * 1024 * 1024) {
+                log.warn("图片超过 10MB，拒绝 path={} size={}", path, size);
+                return null;
+            }
+            byte[] bytes = Files.readAllBytes(target);
             return java.util.Base64.getEncoder().encodeToString(bytes);
         } catch (IOException e) {
+            log.warn("读取图片失败 path={}: {}", path, e.toString());
             return null;
         }
     }

@@ -184,14 +184,20 @@ public class SecurityGuardEngine {
 
     /**
      * 签名：执行 70102，返回 {x-sign, x-mini-wua, x-sgext, x-umt}（Map 的 value 是真实 Map 中取出的字符串）。
+     *
+     * 修复 ILEGAL_SIGN：payload 必须是真机完整的 15 段 INPUT（utdid&uid&...&x-features&7空位），
+     * 且 utdid/deviceId/sid/t/dataMd5 必须与本次 HTTP 请求实际下发的值严格一致。
+     * 旧实现用硬编码 utdid + 只有 3 段的 payload，必然被网关判签名非法。
      */
     public synchronized Map<String, String> sign(String api, String version, String data,
-                                                 String requestId) {
+                                                 String requestId, long t, SignContext ctx) {
         ensureInitialized();
-        String payload = "at88wsLQ2wUDACdd6tSLBrZ7&&&" + appKey + "&&&";
+        String dataMd5 = md5(data);
+        String payload = ctx.buildInput(appKey, dataMd5, t, api, version);
+        log.info("70102 payload(前120字符)={}", payload.length() > 120 ? payload.substring(0, 120) : payload);
         DvmObject<?> ret = doCommand(70102, new ArrayObject(
                 new StringObject(vm, appKey),          // 0 appKey
-                new StringObject(vm, payload),         // 1 payload
+                new StringObject(vm, payload),         // 1 payload（完整 INPUT）
                 DvmBoolean.valueOf(vm, false),         // 2 flag
                 DvmInteger.valueOf(vm, 0),             // 3
                 new StringObject(vm, api),             // 4 api
@@ -210,6 +216,32 @@ public class SecurityGuardEngine {
             }
         }
         return headers;
+    }
+
+    /**
+     * 【仅 JNI 链路自检，已废弃，切勿用于真实网关请求】
+     * 保留仅为兼容旧探针调用：payload 用硬编码 utdid + 空字段，非真机完整结构，
+     * 生成的 x-sign 发给 acs.m.taobao.com 会被判 FAIL_SYS_ILLEGAL_SIGN。
+     * 真实请求必须走 {@link #sign(String, String, String, String, long, SignContext)}，
+     * 由 {@link SignContext#buildInput} 生成与本次请求头一致的设备身份与完整 INPUT。
+     */
+    @Deprecated
+    public synchronized Map<String, String> sign(String api, String version, String data,
+                                                 String requestId) {
+        return sign(api, version, data, requestId, System.currentTimeMillis() / 1000,
+                new SignContext("at88wsLQ2wUDACdd6tSLBrZ7", "", "", "", "", "", "27", "", ""));
+    }
+
+    private static String md5(String s) {
+        try {
+            java.security.MessageDigest md = java.security.MessageDigest.getInstance("MD5");
+            byte[] b = md.digest(s.getBytes("UTF-8"));
+            StringBuilder sb = new StringBuilder();
+            for (byte x : b) sb.append(String.format("%02x", x & 0xff));
+            return sb.toString();
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
     }
 
     public boolean isAvailable() {

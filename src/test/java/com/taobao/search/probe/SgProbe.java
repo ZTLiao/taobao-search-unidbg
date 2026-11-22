@@ -39,12 +39,8 @@ import java.io.File;
 public class SgProbe {
 
     static {
-        // Apple Silicon: 先加载 NativeLoader 触发静态块，解压 arm64 libjnidispatch 并设置 jna.boot.library.path。
-        // 必须在任何 com.sun.jna.Native 使用之前执行。
-        try {
-            Class.forName("com.sun.jna.NativeLoader");
-        } catch (Throwable ignored) {
-        }
+        // JNA 已统一 5.10.0（自带 darwin-aarch64），无需 NativeLoader 预引导；
+        // 预引导注入的 4.5.2 原生库会因版本不符被 JNA 5.10 拒绝。
     }
 
     static final String RES = "src/main/resources/native";
@@ -236,8 +232,17 @@ public class SgProbe {
                 plugin));
     }
 
+    /**
+     * 【仅 JNI 链路自检，切勿用于真实网关请求】
+     * 70102: UnifiedSecurity 签名，12 参数，返回五头 HashMap。
+     *
+     * 这里的 3 段 payload（硬编码 utdid + appKey）只用来验证 doCommandNative 调用链能否跑通，
+     * 它【不是】真机签名 INPUT，发给 acs.m.taobao.com 会被判 FAIL_SYS_ILLEGAL_SIGN。
+     * 真实签名请用 SecurityGuardEngine.sign(api, version, data, requestId, t, SignContext)，
+     * 由 SignContext.buildInput() 生成真机 15 段 + 7 空位的完整 INPUT（见 HOOK_GUIDE.md 第 9/10 章）。
+     */
     static void doSign() {
-        // 70102: UnifiedSecurity 签名，12 参数，返回五头 HashMap
+        // 故意使用最小 3 段 payload：仅自检 JNI 可达性，非真机结构，勿模仿。
         String payload = "at88wsLQ2wUDACdd6tSLBrZ7&&&" + APP_KEY + "&&&";
         DvmObject<?> ret = doCommand(70102, new ArrayObject(
                 new StringObject(vm, APP_KEY),          // 0 appKey

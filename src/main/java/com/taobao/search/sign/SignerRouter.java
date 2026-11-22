@@ -47,13 +47,19 @@ public class SignerRouter {
     public Map<String, String> sign(String api, String version, String appKey, long t,
                                     String data, String requestedBackend,
                                     String token, String cookie) {
+        return sign(api, version, appKey, t, data, requestedBackend, token, cookie, null);
+    }
+
+    public Map<String, String> sign(String api, String version, String appKey, long t,
+                                    String data, String requestedBackend,
+                                    String token, String cookie, SignContext ctx) {
         String b = normalize(requestedBackend);
         try {
             switch (b) {
                 case "h5":
-                    return h5Signer.sign(api, version, appKey, t, data, token, cookie);
+                    return h5Signer.sign(api, version, appKey, t, data, token, cookie, ctx);
                 case "rpc":
-                    return rpcSigner.sign(api, version, appKey, t, data, token, cookie);
+                    return rpcSigner.sign(api, version, appKey, t, data, token, cookie, ctx);
                 case "unidbg": {
                     if (unidbgSigner == null) {
                         throw new IllegalStateException("unidbg 后端未启用 (unidbg.enabled=false)");
@@ -62,7 +68,7 @@ public class SignerRouter {
                     //   1) unidbg(真实 libsgmainso) 产出真机四头 x-sign/x-mini-wua/x-sgext/x-umt
                     //   2) 叠加 H5 MD5 sign（token 有效时）——过 H5 网关校验
                     // 两者协议不同源：native x-sign 是 App 网关协议，H5 sign 是 query 校验
-                    Map<String, String> nativeHeaders = unidbgSigner.sign(api, version, appKey, t, data);
+                    Map<String, String> nativeHeaders = unidbgSigner.sign(api, version, appKey, t, data, token, cookie, ctx);
                     try {
                         Map<String, String> h5 = h5Signer.sign(api, version, appKey, t, data, token, cookie);
                         String md5 = h5.get("sign");
@@ -103,7 +109,11 @@ public class SignerRouter {
         List<String> l = new ArrayList<String>();
         l.add("h5");
         l.add("rpc");
-        l.add("unidbg");
+        // unidbg 仅在 taobaoVM bean 就绪（unidbg.enabled=true）时实际可用；
+        // 否则请求会被 fallback 降级到 mock，如实反映避免 health 误导。
+        if (unidbgSigner != null) {
+            l.add("unidbg");
+        }
         l.add("mock");
         return l;
     }

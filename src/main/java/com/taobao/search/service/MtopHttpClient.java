@@ -7,6 +7,7 @@ import com.taobao.search.config.TaobaoConstants;
 import com.taobao.search.model.ApiResponse;
 import com.taobao.search.sign.MtopTokenManager;
 import com.taobao.search.sign.SignerRouter;
+import com.taobao.search.sign.SignContext;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -54,6 +55,13 @@ public class MtopHttpClient {
     @Value("${mtop.token-handshake.max-retries:2}")
     private int maxRetries;
 
+    /** 协议模式：h5=标准 H5 网关（MD5 sign）；app=App 网关（acs /gw/，x-sign + 四头） */
+    @Value("${mtop.protocol:h5}")
+    private String protocol;
+
+    @Value("${mtop.app-version:" + TaobaoConstants.APP_VERSION + "}")
+    private String appVersion;
+
     @Autowired
     private SignerRouter signerRouter;
 
@@ -94,13 +102,20 @@ public class MtopHttpClient {
         for (int attempt = 1; attempt <= maxAttempts; attempt++) {
             long t = System.currentTimeMillis() / 1000;
             String utdid = human.sessionUtdid();
+            String deviceId = human.sessionDeviceId();
+            String sid = human.sessionSid();
+            boolean appMode = "app".equalsIgnoreCase(protocol);
             // token 始终透传给签名后端（h5 用它算 sign，rpc 签名服务可能也需要）；
             // needToken 只决定本客户端是否驱动「拿 token → 重算 sign → 重试」握手闭环
             String token = tokenManager.token();
             String cookie = tokenManager.cookie();
 
+            // 设备身份三要素：签名 payload 与 HTTP 头必须共用同一组值，
+            // 否则 native x-sign 校验 utdid/deviceId 不一致 -> FAIL_SYS_ILLEGAL_SIGN
+            SignContext signCtx = new SignContext(utdid, deviceId, sid, "", ttid,
+                    "openappkey=DEFAULT_AUTH", "27", human.sessionLat(), human.sessionLng());
             Map<String, String> sign = signerRouter.sign(api, version, appKey, t, data,
-                    backend, token, cookie);
+                    backend, token, cookie, signCtx);
             signMeta = extractMeta(sign);
 
             Map<String, String> params = buildParams(api, version, t, data, sign);
@@ -110,7 +125,30 @@ public class MtopHttpClient {
             }
             if (cookie != null && !cookie.isEmpty()) headers.put("Cookie", cookie);
 
-            String url = gateway + api + "/" + version + "/?" + encode(params);
+            // App 协议（实测穿越 TMD 前置风控的关键形态）：
+            //   POST {gateway}{api}/{v}/（无 query），参数全在 form body；
+            //   UA 用 mtopsdk 原生形态；去掉 H5 专有头（Referer/Origin/x-requested-with）
+            //   额外携带 x-t/x-app-ver/x-pv/x-features/x-utdid/x-c-traceid
+            String url;
+            if (appMode) {
+                url = gateway + api + "/" + version + "/";
+                headers.put("User-Agent", "MTOPSDK/3.1.1.7 (Android;10;Xiaomi;MI 9)");
+                headers.remove("Referer");
+                headers.remove("Origin");
+                headers.remove("x-requested-with");
+                headers.remove("ttid");
+                headers.remove("utd_id");
+                headers.put("x-t", String.valueOf(t));
+                headers.put("x-app-ver", appVersion);
+                // 注意：实测 x-pv 头会触发 FAIL_SYS_PROTOPARAM_MISSED，不能携带
+                headers.put("x-features", "27");
+                headers.put("x-utdid", utdid);
+                headers.put("x-devid", deviceId);
+                if (sid != null && !sid.isEmpty()) headers.put("x-sid", sid);
+                headers.put("x-c-traceid", utdid + t);
+            } else {
+                url = gateway + api + "/" + version + "/?" + encode(params);
+            }
             lastUrl = url;
             if (simulate) human.humanDelay();
 
@@ -139,8 +177,11 @@ public class MtopHttpClient {
                 lastFail = parsed;
                 continue;
             }
-            return parsed.withDiagnostics(gatewayRet, tokenManager.source(), attempt,
-                    hintFor(gatewayRet), trail, signMeta);
+            ApiResponse out = parsed.withDiagnostics(gatewayRet, tokenManager.source(), attempt,
+                    hintFor(gatewayRet, rr.headers, parsed.getRet()), trail, signMeta);
+            String punishUrl = extractPunishUrl(rr.headers);
+            if (punishUrl != null) out.setPunishUrl(punishUrl);
+            return out;
         }
 
         ApiResponse base = lastFail != null ? lastFail
@@ -151,7 +192,7 @@ public class MtopHttpClient {
                 trail, signMeta);
     }
 
-    /** 组装 H5 网关标准 query 参数 */
+    /** 组装网关参数：h5 模式为标准 H5 query；app 模式附加 utdid/uid/sid（进 form body） */
     private Map<String, String> buildParams(String api, String version, long t,
                                             String data, Map<String, String> sign) {
         Map<String, String> p = new LinkedHashMap<String, String>();
@@ -165,10 +206,24 @@ public class MtopHttpClient {
         p.put("dataType", TaobaoConstants.API_TYPE_JSON);
         p.put("ttid", ttid);
         p.put("data", data);
+        if ("app".equalsIgnoreCase(protocol)) {
+            p.put("utdid", human.sessionUtdid());
+            p.put("uid", "");
+            p.put("sid", "");
+            p.put("cre", "");
+            p.put("alexa", "0");
+        }
         return p;
     }
 
     private String pickSign(Map<String, String> sign) {
+        if ("app".equalsIgnoreCase(protocol)) {
+            // App 协议：sign 位放 native x-sign
+            String s = sign.get("x-sign");
+            if (s == null) s = sign.get("mtop_sign");
+            if (s == null) s = sign.get("sign");
+            return s == null ? "" : s;
+        }
         String s = sign.get("sign");
         if (s == null) s = sign.get("mtop_sign");
         if (s == null) s = sign.get("x-sign");
@@ -181,7 +236,8 @@ public class MtopHttpClient {
         Map<String, String> sign = signerRouter.sign(api, version, appKey, t, "{}",
                 backend, null, null);
         Map<String, String> params = buildParams(api, version, t, "{}", sign);
-        String url = gateway + api + "/" + version + "/?" + encode(params);
+        String url = gateway + api + "/" + version + "/"
+                + ("app".equalsIgnoreCase(protocol) ? "" : "?" + encode(params));
         RawResponse rr = post(url, human.headers(ttid, utdid), encode(params));
         boolean ok = tokenManager.absorb(rr.setCookies);
         log.info("probeHandshake tokenUpdated={}", ok);
@@ -204,11 +260,12 @@ public class MtopHttpClient {
         }
     }
 
-    /** 一次 HTTP 往返：body + 所有 Set-Cookie（握手 token 就在其中） */
+    /** 一次 HTTP 往返：body + 所有 Set-Cookie（握手 token 就在其中）+ 关键响应头（bixi 风控） */
     private static class RawResponse {
         String body = "";
         int code = 0;
         List<String> setCookies = new ArrayList<String>();
+        Map<String, String> headers = new LinkedHashMap<String, String>();
     }
 
     private RawResponse post(String url, Map<String, String> headers, String body) {
@@ -220,7 +277,7 @@ public class MtopHttpClient {
             conn.setDoOutput(true);
             conn.setConnectTimeout(15000);
             conn.setReadTimeout(20000);
-            conn.setInstanceFollowRedirects(true);
+            conn.setInstanceFollowRedirects(false);
             for (Map.Entry<String, String> e : headers.entrySet()) {
                 conn.setRequestProperty(e.getKey(), e.getValue());
             }
@@ -231,9 +288,12 @@ public class MtopHttpClient {
 
             rr.code = conn.getResponseCode();
             for (Map.Entry<String, List<String>> e : conn.getHeaderFields().entrySet()) {
-                if (e.getKey() != null && "Set-Cookie".equalsIgnoreCase(e.getKey())
-                        && e.getValue() != null) {
+                if (e.getKey() == null || e.getValue() == null || e.getValue().isEmpty()) continue;
+                String k = e.getKey();
+                if ("Set-Cookie".equalsIgnoreCase(k)) {
                     rr.setCookies.addAll(e.getValue());
+                } else {
+                    rr.headers.put(k, String.valueOf(e.getValue().get(0)));
                 }
             }
             InputStream is = rr.code >= 400 ? conn.getErrorStream() : conn.getInputStream();
@@ -295,11 +355,28 @@ public class MtopHttpClient {
     }
 
     private String hintFor(String gatewayRet) {
+        return hintFor(gatewayRet, null, null);
+    }
+
+    private String hintFor(String gatewayRet, Map<String, String> respHeaders, String rawRet) {
         if ("TOKEN_REQUIRED".equals(gatewayRet)) {
             return "已触发 H5 token 握手但未通过：检查网关是否下发 _m_h5_tk(Set-Cookie)，"
                     + "或注入自有 token/cookie（mtop.token / 请求体 token）";
         }
         if ("RISK_CONTROL".equals(gatewayRet)) {
+            String r = rawRet == null ? "" : rawRet.toUpperCase(Locale.ROOT);
+            String action = respHeaders != null ? respHeaders.get("bx-action") : null;
+            if (r.contains("USER_VALIDATE") || "login".equalsIgnoreCase(action)) {
+                return "风控层要求登录验证（bx-action=login）："
+                        + "1) 从真机/浏览器抓登录态 cookie（cookie2/unb/sktrack 或 sid/uid）"
+                        + "注入：POST /api/token {\"cookie\":\"...\"}；"
+                        + "2) 或用 punishUrl 在浏览器完成验证后取 x5sec 再注入并重试（网关已标记 bx-retry=true）";
+            }
+            if (r.contains("RGV587") && r.contains("SM")) {
+                return "网关前置设备指纹层拦截（RGV587::SM，TMD 无感验证）："
+                        + "需更高保真设备指纹（umid/x-umt 当前为全零、DeviceInfoCapturer 采集为空）。"
+                        + "App 协议模式 mtop.protocol=app + unidbg 后端已实测可穿越该层";
+            }
             return "命中网关风控（滑块/设备/账号校验）。这不属于签名层：需真实设备凭据与账号授权，"
                     + "建议改用官方开放平台 API；本工程不提供风控绕过能力";
         }
@@ -311,6 +388,16 @@ public class MtopHttpClient {
             return "本地网络/解析异常：检查 mtop.gateway 可达性、超时与返回体格式";
         }
         return "网关返回失败：可切换 signBackend，或查看 handshakeTrail / rawData 定位卡点";
+    }
+
+    /** 从 bixi 风控响应头提取验证页 URL（Location 头，punish 页面） */
+    private String extractPunishUrl(Map<String, String> respHeaders) {
+        if (respHeaders == null) return null;
+        for (String k : new String[]{"Location", "location"}) {
+            String v = respHeaders.get(k);
+            if (v != null && v.contains("punish")) return v;
+        }
+        return null;
     }
 
     private Map<String, String> extractMeta(Map<String, String> sign) {
