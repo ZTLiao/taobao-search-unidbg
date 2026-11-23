@@ -11,7 +11,9 @@
     GET  /capture       -> 最近一次 App 真实签名入参/出参（诊断用）
 
 前置条件：
-  - adb 可见模拟器/真机，frida-server 正在运行
+  - 模式 A（默认，需 root 或可 attach）：adb 可见设备，frida-server 正在运行
+  - 模式 B（gadget，免 root / 无需 ptrace）：重打包淘宝已静态注入 frida-gadget，
+    已建立 adb forward；设置 FRIDA_GADGET_HOST 即启用
   - 淘宝 App 已安装并至少启动过一次（Mtop/SecurityGuard 已初始化）
   - python3 -m pip install frida
 
@@ -19,6 +21,9 @@
   python3 tools/frida_rpc_bridge.py --port 9091
   # 或指定 pid / 设备
   FRIDA_PID=4764 python3 tools/frida_rpc_bridge.py
+  # gadget 模式（非 root 真机）
+  adb -s <serial> forward tcp:27043 tcp:27043
+  FRIDA_GADGET_HOST=127.0.0.1 FRIDA_GADGET_PORT=27043 python3 tools/frida_rpc_bridge.py
 
 工程侧配置：
   search.sign-backend=rpc
@@ -38,7 +43,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import frida
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-BUNDLE = os.path.join(HERE, 'frida', 'rpc_sign_bundle.js')
+# 默认完整签名 bundle；gadget 进程内模式可用 FRIDA_BUNDLE 指向精简版
+# rpc_native_only_bundle.js，避免诊断 hook 保存 Java 对象引用触发 JNI SIGABRT。
+BUNDLE = os.environ.get('FRIDA_BUNDLE',
+                        os.path.join(HERE, 'frida', 'rpc_sign_bundle.js'))
 DEFAULT_PACKAGE = 'com.taobao.taobao'
 
 _state = {
@@ -90,20 +98,46 @@ def connect(package, pid_override=None):
     with _lock:
         if _state['script'] is not None:
             return _state['script']
-        device_id = os.environ.get('FRIDA_DEVICE')
-        dev = frida.get_usb_device() if not device_id else frida.get_device(device_id)
-        pid = pid_override or os.environ.get('FRIDA_PID')
-        if pid:
-            pid = int(pid)
-        elif os.environ.get('FRIDA_SPAWN') == '1':
-            # 从进程启动就注入：SecurityGuard 初始化命令（如 70102）只在早期出现
-            pid = dev.spawn([package])
-            dev.resume(pid)
+
+        gadget_host = os.environ.get('FRIDA_GADGET_HOST')
+        if gadget_host:
+            # gadget listen 模式：so 在淘宝进程内起 frida server，无需外部 ptrace。
+            # 通过 adb forward 把设备端口映射到本机后，以 remote device 连接。
+            gadget_port = os.environ.get('FRIDA_GADGET_PORT', '27043')
+            addr = '%s:%s' % (gadget_host, gadget_port)
+            log('gadget mode: connecting remote device %s' % addr)
+            dev = frida.get_device_manager().add_remote_device(addr)
+            want = os.environ.get('FRIDA_GADGET_NAME', 'Gadget')
+            procs = dev.enumerate_processes()
+            target = None
+            for p in procs:
+                if p.name == want or want in p.name:
+                    target = p.name
+                    break
+            if target is None and procs:
+                target = procs[0].name
+            if not target:
+                raise RuntimeError('gadget 未监听或无可 attach 进程: %s (procs=%s)'
+                                   % (addr, [(p.pid, p.name) for p in procs]))
+            # gadget 模式下进程名即 attach 目标，pid 仅作展示占位。
+            session = dev.attach(target)
+            pid = target
         else:
-            pid = resolve_pid(dev, package)
-        if not pid:
-            raise RuntimeError('未找到 %s 进程（可设置 FRIDA_PID）' % package)
-        session = dev.attach(pid)
+            device_id = os.environ.get('FRIDA_DEVICE')
+            dev = frida.get_usb_device() if not device_id else frida.get_device(device_id)
+            pid = pid_override or os.environ.get('FRIDA_PID')
+            if pid:
+                pid = int(pid)
+            elif os.environ.get('FRIDA_SPAWN') == '1':
+                # 从进程启动就注入：SecurityGuard 初始化命令（如 70102）只在早期出现
+                pid = dev.spawn([package])
+                dev.resume(pid)
+            else:
+                pid = resolve_pid(dev, package)
+            if not pid:
+                raise RuntimeError('未找到 %s 进程（可设置 FRIDA_PID）' % package)
+            session = dev.attach(pid)
+
         with open(BUNDLE, encoding='utf-8') as f:
             source = f.read()
         script = session.create_script(source)
@@ -279,6 +313,11 @@ class Handler(BaseHTTPRequestHandler):
                 result = rpc_json('sign_legacy', json.dumps({
                     'input': body.get('input', ''), 'appKey': body.get('appKey', '21646297')
                 }))
+            elif self.path.startswith('/api/search/native-main'):
+                # 主线程版：把 syncRequest post 到 App UI 线程执行（验证签名上下文）
+                result = rpc_json('nativeSearchOnMain', json.dumps(body, ensure_ascii=False))
+                log('native search (main thread) api=%s -> %s' % (
+                    body.get('api'), result.get('retCode') or result.get('error')))
             elif self.path.startswith('/api/search/native'):
                 # 免登录原生搜索：App 原生 MtopBuilder 栈发请求，游客态。
                 # body: {api, version, data, ttid, method:'POST'|'GET', headers:{}}

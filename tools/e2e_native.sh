@@ -5,14 +5,23 @@ set -u
 cd "$(dirname "$0")/.."
 PORT_APP=9094
 PORT_BRIDGE=9091
-PY=/Users/liaozetao/.workbuddy/binaries/python/versions/3.13.12/bin/python3
-export JAVA_HOME=/Users/liaozetao/Library/Java/JavaVirtualMachines/corretto-1.8.0_452/Contents/Home
+# 跨平台探测（macOS / Windows Git Bash / Linux），不再写死某台机器的路径
+PY="$(command -v python3 || true)"
+if [ -z "$PY" ]; then echo "ERROR: python3 不可用" >&2; exit 1; fi
+if [ -z "${JAVA_HOME:-}" ] || [ ! -x "$JAVA_HOME/bin/java" ]; then
+  for CAND in "/c/Program Files/Java/jdk-1.8" \
+              "/Users/liaozetao/Library/Java/JavaVirtualMachines/corretto-1.8.0_452/Contents/Home"; do
+    if [ -x "$CAND/bin/java" ]; then export JAVA_HOME="$CAND"; break; fi
+  done
+fi
 JAR=target/taobao-search-unidbg-1.0.0.jar
+JAVA_BIN="${JAVA_HOME:+$JAVA_HOME/bin/java}"
+if [ -z "$JAVA_BIN" ] || [ ! -x "$JAVA_BIN" ]; then JAVA_BIN="$(command -v java || true)"; fi
+if [ -z "$JAVA_BIN" ]; then echo "ERROR: java 不可用" >&2; exit 1; fi
 
-echo "=== [0] 清理 ==="
-pkill -f frida_rpc_bridge 2>/dev/null || true
-pkill -f 'taobao-search-unidbg-1.0.0' 2>/dev/null || true
-sleep 2
+echo "=== [0] 环境检查（不杀已有进程，端口占用时复用）==="
+echo "python3=$PY java=$JAVA_BIN"
+bash tools/preflight_device.sh "$PORT_BRIDGE" || true
 
 echo "=== [1] 启动 bridge ==="
 nohup "$PY" tools/frida_rpc_bridge.py --port "$PORT_BRIDGE" > /tmp/e2e_bridge.log 2>&1 &
@@ -24,7 +33,7 @@ done
 echo "bridge health: $(curl -s -m 3 http://127.0.0.1:$PORT_BRIDGE/health | head -c 40)"
 
 echo "=== [2] 启动 SpringBoot native 模式 ==="
-nohup "$JAVA_HOME/bin/java" -jar "$JAR" \
+nohup "$JAVA_BIN" -jar "$JAR" \
   --server.port=$PORT_APP \
   --mtop.protocol=native \
   --sign.rpc.native-search-url=http://127.0.0.1:$PORT_BRIDGE/api/search/native \

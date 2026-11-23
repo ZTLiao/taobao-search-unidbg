@@ -14603,35 +14603,78 @@ rpc.exports = {
     }
     Java.perform(function () {
       try {
-        // 1) 拿 App 的 Mtop 实例（优先存活 context 的 builder.mtopInstance）
+        // 1) 选淘宝主进程的 Mtop 实例。
+        // smali(Mtop.smali): instanceMap 里同时存在 MTOP_ID_ELEME / MTOP_ID_KOUBEI /
+        // MTOP_ID_XIANYU / INNER / MTOP_ID_TAOBAO 等实例；冷启动时 getInstance('')
+        // 可能先命中非主实例（曾见 MTOP_ID_ELEME），导致 ANDROID_SYS_MTOPCONTEXT_INIT_ERROR。
+        // 这里按「实例 ID + ttid + utdid + isInited + 是否来自存活请求上下文」打分，取最高分。
         var Mtop = Java.use('mtopsdk.mtop.intf.Mtop');
-        var mtop = null, iid = null;
+        var mtop = null, iid = null, bestScore = -9999, bestSource = null;
+        var candidates = [];
+        var seen = {};
+
+        function scoreInstance(inst, source) {
+          if (!inst) return;
+          var id = '', ttid = '', utdid = '', inited = false;
+          try { var v = inst.getInstanceId(); id = v === null ? '' : String(v); } catch (e) {}
+          try { var v2 = inst.getTtid(); ttid = v2 === null ? '' : String(v2); } catch (e) {}
+          try { var v3 = inst.getUtdid(); utdid = v3 === null ? '' : String(v3); } catch (e) {}
+          try { inited = inst.isInited.value === true; } catch (e) {}
+          var key = id + '|' + ttid;
+          if (seen[key]) return;
+          seen[key] = true;
+
+          var low = (id + ' ' + ttid).toLowerCase();
+          var score = 0;
+          // 非淘宝站点实例直接淘汰（Eleme/Koubei/Xianyu 的签名上下文与淘宝不同）
+          if (low.indexOf('eleme') >= 0 || low.indexOf('koubei') >= 0 || low.indexOf('xianyu') >= 0) score -= 1000;
+          // Mtop.smali: MTOP_ID_TAOBAO="MTOP_ID_TAOBAO", MTOP_ID_INNER="INNER", MTOP_SITE_TAOBAO="taobao"
+          if (id === 'MTOP_ID_TAOBAO' || id === 'INNER' || id === 'taobao' || id === '21646297') score += 100;
+          if (ttid.indexOf('taobao_android') >= 0) score += 60;
+          if (ttid.indexOf('231200@') === 0) score += 20;
+          if (utdid.length >= 16) score += 20;
+          if (inited) score += 10;
+          if (source === 'live-context') score += 40;
+
+          candidates.push({id: id, ttid: ttid.substring(0, 60), utdidLen: utdid.length,
+                           inited: inited, source: source, score: score});
+          if (score > bestScore) { bestScore = score; mtop = inst; iid = id; bestSource = source; }
+        }
+
+        // a) 存活请求上下文里的实例最可信（与真机搜索同一 Mtop）
         try {
           Java.choose('tb/w4j', {
             onMatch: function (inst) {
-              if (mtop) return;
               try {
                 var o = inst.o.value;
-                if (o !== null) {
-                  var mi = o.mtopInstance.value;
-                  if (mi !== null) {
-                    mtop = mi;
-                    try { iid = String(mi.getInstanceId()); } catch (e) {}
-                    return 'stop';
-                  }
-                }
+                if (o !== null) scoreInstance(o.mtopInstance.value, 'live-context');
               } catch (e) {}
             }, onComplete: function () {}
           });
         } catch (e) {}
-        if (!mtop) {
-          var cands = ['', 'INNER', 'taobao', '21646297'];
-          for (var i = 0; i < cands.length; i++) {
-            try { mtop = Mtop.getInstance(cands[i]); if (mtop) { iid = cands[i]; break; } } catch (e) {}
-          }
+
+        // b) 堆上全部 Mtop 实例
+        try {
+          Java.choose('mtopsdk.mtop.intf.Mtop', {
+            onMatch: function (inst) { scoreInstance(inst, 'heap'); },
+            onComplete: function () {}
+          });
+        } catch (e) {}
+
+        // c) 按已知 ID 兜底（冷启动尚未产生请求上下文时）
+        var ids = ['MTOP_ID_TAOBAO', 'INNER', 'taobao', '21646297', ''];
+        for (var i = 0; i < ids.length; i++) {
+          try { scoreInstance(Mtop.getInstance(ids[i]), 'getInstance'); } catch (e) {}
         }
-        if (!mtop) { out.error = 'no Mtop instance'; return; }
+        if (!mtop || bestScore < 0) {
+          out.error = 'no usable Taobao Mtop instance';
+          out.instanceCandidates = candidates;
+          return;
+        }
         out.instanceId = iid;
+        out.instanceSource = bestSource;
+        out.instanceScore = bestScore;
+        out.instanceCandidates = candidates;
 
         // 2) 构造合法 MtopRequest
         out.step = 'MtopRequest';
