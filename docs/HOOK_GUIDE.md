@@ -1,5 +1,9 @@
 # unidbg 补环境指南（开启真实签名）
 
+> **文档与清理说明（2026-11-24）**：本文是完整的逆向研究日志，记录了从 frida 注入、gadget 重打包、IDA 静态分析到 unidbg 引擎、native 网络栈的全过程和结论。**其中引用的一次性研究脚本/探针（frida hook、IDA 分析、gadget、tnet/H2/原生TLS 探针等）已在项目清理中移除**，仅保留结论与关键代码片段供追溯。这些历史引用是当时的研究记录，不表示文件仍存在。
+>
+> 项目当前可直接使用的部分见 [`README.md`](../README.md)：生产代码在 `src/main/`，有效回归探针为 `WatchcatRegression`（文本搜索静态 CDN）、`SignContextTest`、`SignEngineRegression`、`DeviceSpoofRegression`。核心结论（§28）指出：纯 unidbg 客户端无法初始化 UMID/AMDC native 状态，文本搜索走 watchcat 静态 CDN 已打通，图片搜索仍需有效会话凭据或真机 native 态。
+
 本工程的 `unidbg` 签名后端复刻开源 unidbg-server 的扩展方式，但目标 SO 换成了淘宝的 `libsgmain`（阿里 SecurityGuard）。这类 SO 是加固/强混淆库，完整补环境工作量远大于普通 SO。本指南说明如何推进。
 
 ## 1.  honor 前提
@@ -709,3 +713,487 @@ E2E_WATCHCAT_RESULT=PASS
 **证据修正（避免误判）**：`scancode/common/mtop/request/PailitaoRecommendRequest.smali:64-67` 确实 `NEED_SESSION = 0x1`，但全工程检索显示**该类无任何外部引用（死代码）**；图搜主链路走 `ImageSearchMtopUtil` 直接构造 `MtopRequest`。因此 NEED_SESSION 只能作为「扫码入口曾设计为需登录」的旁证，**不是图搜主链路强制登录的决定性证据**。历史图搜回归 `regression_image_iphone.json` 实际卡点为 `ANDROID_SYS_GENERATE_MTOP_SIGN_ERROR`（签名生成错误），印证图搜当前瓶颈在 mtop 签名/bixi 而非 session 字段。
 
 **结论**：图片免登录没有可用的静态捷径，也没有「图→词→watchcat」的间接通路。可行路径仍只有：① 干净未 root 真机 + 官方 APK 原生栈低频调用；② 自持登录 Cookie；③ 官方开放平台 API。
+
+---
+
+## 23. 设备态伪装修正尝试 + 决定性证伪：wh_ttid=pc 在传输层（2026-11-24）
+
+### 23.1 需求与目标
+用户要求「修正设备态/登录态，模拟真机状态，隐藏是 unidbg 发起」，从根上过 bixi。
+
+### 23.2 已落地的设备态伪装修正（均已编译 + 回归 PASS）
+1. `application.properties`：设备态从「空值→随机假值」改为固化真机抓包值
+   （utdid=`awJ3hY/Mq3EDAMWt0Bs6MAqV`、deviceId=`AuBCx...`、umt=`nQkBd8p...`、
+    ttid=`231200@taobao_android_10.69.10`、lat/lng 真机值）。
+2. `HumanBehaviorSimulator.appUa()`：默认 UA 去掉 `sdk_gphone64_arm64` 模拟器标识，
+   改为量产机 `MTOPSDK/3.1.1.7 (Android;13;Xiaomi;22081212C)`。
+3. `AppGatewayScan`：同步上述真机设备态与 UA 常量。
+4. `TaobaoJni`：补齐 Build 设备指纹（MANUFACTURER/BRAND/MODEL/DEVICE/PRODUCT/
+   BOARD/HARDWARE/FINGERPRINT/ID/DISPLAY/VERSION.RELEASE），SDK_INT 31→33 统一 Android 13，
+   消除 DeviceInfoCapturer 采集为空的问题。
+5. `UnidbgMtopSigner`：签名结果里 x-umt 全零（SG 读不到本地 token）时用配置真机 umt
+   覆盖，使 x-umt 头与 umt 头同源。新增 `DeviceSpoofRegression` 探针验证 → PASS。
+6. 回归：`SignEngineRegression` 四头完整产出 PASS；`DeviceSpoofRegression` PASS。
+
+### 23.3 ★决定性证伪：设备态伪装无法改变 wh_ttid=pc
+用修正后的全套真机设备态重打 App 网关（`AppGatewayScan`）：
+```
+文本 MtopRecommend + m 头  -> HTTP 419 USER_VALIDATE
+图片 PailitaoRecommend + m 头 -> HTTP 419 USER_VALIDATE
+风控头: bxpunish=1 bx-action=login bx-retry=true
+Location = https://bixi.alicdn.com/punish/14772_preview.html?wh_ttid=pc
+```
+**与修正前完全一致**——设备态字段全换真机值、Build 指纹补齐、x-umt 去全零后，
+`wh_ttid=pc` 判定纹丝不动。
+
+### 23.4 结论：wh_ttid=pc 是传输层（TLS/HTTP2 指纹）判定，非设备态字段
+- `wh_ttid=pc` 出现在**惩罚页 URL**里，是网关在解析任何 HTTP 头之前，根据
+  **客户端传输指纹**（Java HttpURLConnection 的 TLS ClientHello / HTTP2 帧序 /
+  header 顺序 / Cipher 套件）判定的「这是 web/PC 客户端，不是 App 原生栈」。
+- 佐证（HOOK_GUIDE §22.3 / §18）：真机 MTOP 请求走 native anetwork 栈，
+  headerCapture/netHeaders 抓不到任何 Java 网络 API 调用——native 层直发 TCP。
+- 因此**改任何 Java 层设备态字段（utdid/umt/Build/UA）都无法隐藏 unidbg 身份**，
+  识别发生在 OSI 更底层。要让 unidbg 请求被当作 App 原生栈，只能：
+  ① 让 unidbg 调用 APK 内 anetwork native 库直发（需完整 Android 运行时网络栈，
+  unidbg 0.9.8 不具备）；② 用真机原生栈（NativeSearchClient + frida bridge，
+  但需干净设备）；③ 走免签名的 watchcat 静态 CDN（文本已解决，图片无兜底）。
+- 本轮设备态伪装修正**保留**：它消除了明显的模拟器/全零特征，是必要的卫生改进，
+  在接真机签名源或未来支持 native 网络栈时立即生效；但**单独不足以过 bixi**。
+
+---
+
+## 24. 让 unidbg 加载 anetwork 网络栈直发：可行性验证（2026-11-24）
+
+### 24.1 目标
+绕过 §23 证实的「传输层 wh_ttid=pc 判定」——不再用 Java HttpURLConnection，
+而是让 unidbg 直接调用淘宝 APK 内的 anetwork native 网络栈（libtnet/libtb_ssl），
+由它们的 native socket + 自研 TLS 发请求，请求形态与真机 App 原生栈一致。
+
+### 24.2 网络栈 SO 套件（从官方 APK lib/arm64-v8a 提取，已随工程打包）
+- `libtnet.so`(432KB) — anetwork 核心，导出 61 个 `NAL_*` C ABI 函数
+- `libtb_ssl.so`(371KB) — 淘宝自研 BoringSSL，导出 533 个 `tb_SSL_*`，**TLS 由它自己实现，直接操作 socket fd**
+- `libtb_crypto.so`(1.4MB) — 加密算法库
+- `libtnet_adapt.so` / `libxnet_next.so` / `libc++_shared.so` 等依赖
+
+关键架构发现：**libtnet.so 无 Java_* 导出（只有 JNI_OnUnload）**，
+是纯 C ABI，可直接调用，无需 JNI 补环境。unidbg 0.9.8 提供 `SocketIO/TcpSocket/DnsProxyDaemon`
+支持 socket syscall，TLS 由 libtb_ssl 内部完成 —— 理论上可闭环。
+
+### 24.3 已验证的里程碑（真实可复现）
+新增探针 `TnetLoadProbe` / `TnetCallProbe` / `TnetRequestProbe`，反汇编脚本 `tools/analysis/tnet_disasm.py`：
+```
+✅ 5 个网络 SO 全部在 unidbg 加载成功（base 地址有效）
+✅ 全部 NAL_* 符号解析成功：NAL_init_Tnet@0x405a9c78 / NAL_request_Create / ...
+✅ NAL_init_Tnet(1,0) -> 0 成功（网络库真正执行，创建了 pipe 线程通信）
+✅ NAL_start_Tnet() -> 0 成功
+✅ NAL_request_Create() -> 有效对象指针；NAL_request_SetUrl() 成功
+```
+函数签名（反汇编得出）：
+- `NAL_init_Tnet(io_thread_num=1, merge_branch_cold=0)` — logcat 佐证
+- `NAL_start_Tnet()` 无参
+- `NAL_request_Create()` -> req*；`NAL_request_SetUrl(req, char* url)`（str x1,[x0,#0x28]）
+- `NAL_session_Create(x0, w1, w2)` / `NAL_session_SubmitRequest(session*, req*)`
+
+### 24.4 当前瓶颈（诚实记录）
+- `NAL_session_Create(url, 443, 0)` 返回 NULL（不开日志时）/ 抛 UC_ERR_FETCH_UNMAPPED（开 NAL_log_set_print 后
+  触发 log 函数指针表 [0x6d000+0xe08] 为 NULL 的分支）。
+- 根因：tnet 的 session 层依赖**上层注册的回调/函数指针表**（handler、log 表），这些在正常 App 里
+  由 Java/xnet 层通过 JNI 初始化；纯 C 直接调用时这些全局指针为空。
+- `NAL_session_SubmitRequest` 因 session=NULL 返回 -1。
+- 未解决：① session_Create 首个参数的确切格式（URL? host 结构? IP?）；② handler 回调表注册；
+  ③ log 函数指针表初始化；④ unidbg socket IO 接管 connect/send/recv；⑤ tnet 异步线程 emulation。
+
+### 24.5 结论与后续
+- **技术路线前半段已证实可行**：unidbg 加载并执行淘宝 anetwork 网络栈（init/start 成功）是真实里程碑，
+  此前无人在此工程验证过。
+- **完整 HTTPS 直发仍有实质障碍**：session 层回调表依赖 + 异步线程 + socket 接管，是数天级研究工程，
+  且 unidbg 0.9.8 是否能完整 emulate tnet 的异步 TLS 栈仍是未知数。
+- 若要继续：优先从 smali（anetwork/xnet Java 层）还原 session 创建时注册的回调结构与参数格式，
+  而非盲猜 C 参数。这是下一步的正确方向。
+
+---
+
+## 25. anetwork native 直发链路：SubmitRequest 攻破与 unidbg 网络栈根本限制（2026-11-24）
+
+### 25.1 smali 层回调结构还原（anetwork/xnet）
+发送主链路（native 真正入口）：
+```
+XNHttpRequest.sendHttpRequest(XNRequest, IXNHttpListener)
+  -> nativeSendHttpRequest(XNRequest, XNHttpDispatcher)   // AKI 绑定 libxnet_next.so
+```
+- native 层把两个 **Java 对象整体**交进去，靠反射/JNI 读字段，不是走 NAL_* C ABI。
+- `XNHttpDispatcher` = handler 载体，字段 `target: IXNHttpListener`。
+- native → Java 回调入口（4 个）：`onDataReceiveNative(JJByteBuffer)` / `onFinishNative(ZJString)` /
+  `onMetricsNative(String)` / `onResponseCodeNative(JString)`。
+- `IXNHttpListener` 接口 4 方法：`onXNDataReceiveSize` / `onXNFinish` / `onXNMetrics` / `onXNResponseCode`。
+- `XnetRequestTask$XnetCallbackBridge` 实现该接口，把 xnet 回调转成 anetwork `Callback`。
+- `XNInitializer.nativeInitParam(Map)` 参数由 `tb/hhg.b()` 构造（含 utdid/deviceId/ttid/env 等 27 个 key）。
+
+### 25.2 ★决定性突破：-0x7ef 根因 = URL 格式
+- 反汇编纠错：旧值 `4294965265` 不是 -31，而是 `0xFFFFF811 = -0x7EF (-2031)`。
+- 返回路径 `0x481a4`；触发链 `0x47ec0 ldr x0,[req+0x28] -> bl 0x474f4 -> cbz -> error`。
+- `0x474f4` = URL parser，`.rodata 0xa3e4` = `"://\0"` 证明要求完整 scheme。
+- **根因**：`NAL_session_Create` 首参必须纯 host（`acs.m.taobao.com`），
+  但 `NAL_request_SetUrl` 必须完整 URL（`https://acs.m.taobao.com/gw/`）。
+  之前两者共用纯 host 字符串 → URL 解析失败 → -0x7ef。
+- 修复（TnetRequestProbe 分离 hostPtr/urlPtr）后：
+  ✅ `NAL_session_SubmitRequest -> 0`（成功！从 -0x7ef 攻破）
+
+### 25.3 NAL_* handler/setter 结构（反汇编）
+59 个 NAL_* 导出已全表导出。关键偏移：
+| API | 写入结构 |
+|---|---|
+| `NAL_request_SetHead(req,h)` | req+0x20 |
+| `NAL_request_SetHandler(req,h)` | req+0x48(q0,16B)+0x58(8B) 共24B 回调表 |
+| `NAL_request_SetContext(req,c)` | req+0x60 |
+| `NAL_request_SetTimeout(req,w)` | req+0x68 |
+| `NAL_request_SetRdTimeout(req,w)` | req+0x6c |
+| `NAL_session_SetHandler(s,h)` | memset(s+0x78, 0x98) |
+| `NAL_session_SetContext(s,c)` | s+0x70 |
+| `NAL_session_SetProtocol(s,w)` | s+0x4c |
+
+### 25.4 线程调度深挖
+- 默认 `threadDispatcherEnabled=false` → `NAL_start_Tnet` 的 `bionic_clone` 被吞（threads=0）。
+  修复：`emulator.getSyscallHandler().setEnableThreadDispatcher(true)` → 日志出现
+  `bionic_clone fn=...0x67c70`，threads=1，IO 线程创建成功。
+- `SubmitRequest` 内部 `Write 1 bytes to 'PipedWrite: 3'` = 任务写管道给 IO 线程。
+- `runThreads()` 抛 IllegalStateException 原因：run() 只消费 `taskList`，
+  而 bionic_clone 加入的是 `threadTaskList`，两队列不同，taskList 空即抛异常。
+
+### 25.5 ★★重要更正（2026-11-24 深夜二次核查）：unidbg 0.9.8 已内置 TCP socket 转发
+- 之前"unidbg 无 TCP socket 支持"的结论**错误**，原因是查错了类（只看 AndroidSyscallHandler
+  的 public 方法，漏了 ARM64SyscallHandler 的 private 实现）。反编译 `ARM64SyscallHandler` 证实：
+  - `socket(domain=2 AF_INET, type=1 SOCK_STREAM)` → **`new TcpSocket(emulator)`**
+  - `domain=2,type=2` → `UdpSocket`；`domain=1 AF_UNIX` → `LocalSocketIO`/`LocalAndroidUdpSocket`
+  - 完整 syscall 方法：socket/socketpair/connect/sendto/recvfrom/setsockopt/getsockopt/
+    bind/listen/getpeername/getsockname/getsockopt 全部实现。
+  - `TcpSocket` 内部持有 `java.net.Socket`，`connect_ipv4()` 直接 `socket.connect(InetSocketAddress)`
+    + `getOutputStream()` + `getInputStream()`；`recvfrom/read/write` 走真实流。
+  - **即：用户要的"socket syscall 转发到宿主 JVM"unidbg 0.9.8 已内置完成，无需从零实现。**
+- Dobby hook 实证：tnet IO 线程确实调用 libc 的 `socket`/`connect`/`sendto`/`recvfrom`/`getaddrinfo`。
+
+### 25.6 ★ socket syscall 转发实证成功（SocketForwardProbe）
+新增 `src/test/java/com/taobao/search/probe/SocketForwardProbe.java`，绕过 tnet 直接调 libc：
+```
+socket(AF_INET=2, SOCK_STREAM=1, 0) -> fd=3
+connect(203.119.204.148:443) -> 0  cost=49ms  errno=0    ← 真实 TCP 连接成功
+send -> 60 bytes
+recv -> 284 bytes
+RESPONSE: HTTP/1.1 404 Not Found
+          Server: Tengine/AServer-Ingress/3.0.46         ← 淘宝真实服务器应答
+          Date: Tue, 24 Nov 2026 09:26:32 GMT
+```
+**结论：socket syscall 转发已实质完成且验证通过。** 关键调用方式：
+1. 先 `vm.loadLibrary(libtnet.so, false)` 触发动态链接器加载 libc（否则 findModule("libc.so")=NULL）
+2. `memory.findModule("libc.so")` 拿到 module
+3. `libc.callFunction(emulator, "socket"/"connect"/"send"/"recv", ...)`
+4. unidbg ARM64SyscallHandler 自动把 AF_INET socket 转成 TcpSocket(java.net.Socket)
+5. `setEnableThreadDispatcher(true)` 开启线程调度
+
+### 25.7 真正剩余问题与后续
+- socket 转发层已通；C API 链路已到 `SubmitRequest -> 0`；DNS 解析也通
+  （`DnsProxyDaemon: acs.m.taobao.com -> 203.119.204.148`）。
+- **剩余问题是 tnet 内部未走到 socket(AF_INET)**：日志只有 `socket domain=1`(dnsproxyd)，
+  do_connect 也返回 0 但不建 TCP 连接。SubmitRequest 只写 `PipedWrite: 3`，
+  IO 线程（worker @0x22844）被调度但没消费管道任务发起 connect。
+- 下一步两条路：
+  ① 继续补 tnet：解决 IO 线程 pipe 消费 + handler 注册，让 libtb_ssl TLS 栈用已通的 TcpSocket fd；
+  ② 绕过 tnet：直接用 libc socket + 宿主 TLS 发 HTTPS（需解决 TLS，可用 unidbg 加载 libtb_ssl.so）。
+- 图片搜索免登录：socket 转发打通是必要前提，若进一步解决 TLS 即可用该链路请求
+  `PailitaoRecommend.recommend`；否则仍需 ①干净量产真机原生栈 ②登录 Cookie ③官方 API。
+  文本搜索 watchcat 静态 CDN 方案不受影响，仍为已解决状态。
+
+---
+
+## 26. 补 tnet 深挖：网络状态标志、capstone 版本与 AKI 崩溃（2026-11-24 深夜）
+
+### 26.1 完整加载链与 JNI_OnLoad 矩阵
+- 按依赖顺序加载 8 个 SO：libc++_shared → libpie_dynamic(AKI/libuv) → libAliHALogEngine →
+  libtb_crypto → libtb_ssl → libtnet_adapt → libtnet → libxnet_next。
+- JNI_OnLoad 结果：libAliHALogEngine/libtnet 成功；libpie_dynamic/libxnet_next 失败。
+- 关键：xnet_next 的 NAL_* 全是 UNDEF（从 libtnet 导入），调它等价于调 libtnet。
+
+### 26.2 网络可用状态标志（do_connect 前置检查）
+- 反汇编 `NAL_session_do_connect`：前置调用 `0x4fd70` 检查全局 `[0x74f38+8]==1`
+  （网络可用），`0x312e0` 读网络类型 `[0x74000+0x280]`，两者不满足则直接返回 -1。
+- 正常由 Java 层 `XNJniBridge.nativeOnConnectivityChanged` 经 AKI 设置。
+- 探针强制写值：地址 = `tnet.base + vaddr`（module.base 对应 ELF vaddr 0）。
+  网络标志 = base+0x74f40，网络类型 = base+0x74280。设置 netAvail=1 后 do_connect 前置检查通过，
+  但仍未发起 AF_INET connect。
+
+### 26.3 capstone 版本不匹配（已修复）
+- 现象：JNI_OnLoad 抛 `NoClassDefFoundError: capstone/api/DisassemblerFactory`。
+- 根因：pom 用 capstone 3.0.11（无此类），unidbg 0.9.8 需要 3.1.x。
+- 修复：pom.xml capstone 3.0.11 → **3.1.8**，重新 build-classpath。
+- 修复后 NoClassDefFoundError 消失，变为 Illegal JNI version 0xffffffff。
+
+### 26.4 ★AKI 框架崩溃根因（未解决，unidbg emulation 精度问题）
+- libpie_dynamic.so 的 JNI_OnLoad 崩溃：`UC_ERR_READ_UNMAPPED`，PC=base+0x160d9c。
+- 指令 `ldaxrb w0,[x1]`（ARM 原子加载，C++ std::atomic），x1 是野指针（未初始化的 atomic 变量）。
+- 该函数检查全局 `[0x175000+0x900]` 决定用 ARMv8.1 `swpab` 还是 `ldaxrb` 回退。
+- 根因：AKI/libuv 框架初始化不完整，某个 atomic 变量未初始化 → JNI_OnLoad 返回 JNI_ERR(-1)。
+- 这导致 xnet_next 的 AKI 绑定（XNHttpRequest.nativeSendHttpRequest 等）未注册。
+
+### 26.5 当前完整状态与结论
+- ✅ socket syscall 转发可用（SocketForwardProbe 真实连通淘宝服务器）
+- ✅ DNS 可用（DnsProxyDaemon 解析 acs.m.taobao.com）
+- ✅ C API 链路到 SubmitRequest->0（URL 格式是 -0x7ef 根因）
+- ✅ 网络状态标志可强制设置
+- ❌ tnet worker（libuv/epoll 异步模型）未发起 AF_INET connect —— 因 AKI 框架 JNI_OnLoad 崩溃，
+  xnet_next 的 native 方法绑定不完整，异步请求任务链路断裂。
+- 继续死磕需修 unidbg 的 atomic/emulation 精度或完整补 AKI 的 Java 类注册，成本高、不确定。
+- **务实建议**：既然 libc socket 转发已可用，下一步优先考虑「绕过 tnet 异步栈，
+  用 libc socket + 宿主 TLS（或 libtb_ssl.so）直接发 HTTPS」这条更短的路径。
+
+---
+
+## 27. 绕过 tnet：淘宝原生 TLS 栈直发实证 + wh_ttid=pc 根因再修正（2026-11-24）
+
+### 27.1 目标与执行（用户决策：绕过 tnet）
+放弃 tnet/libuv/AKI 异步栈（AKI JNI_OnLoad 崩溃未修，成本高不确定），
+改用已验证可用的 libc socket syscall 转发 + 淘宝自研 libtb_ssl.so（BoringSSL）直接发 HTTPS/MTOP。
+
+### 27.2 libtb_ssl.so 符号分析（pyelftools）
+- 完整 BoringSSL：874 个 FUNC 导出，其中 `tb_SSL_*` 476 个。
+- 握手必备 API 齐全：`tb_TLS_client_method / tb_SSL_CTX_new / tb_SSL_new / tb_SSL_set_fd /
+  tb_SSL_set_tlsext_host_name / tb_SSL_set_alpn_protos / tb_SSL_connect / tb_SSL_write / tb_SSL_read /
+  tb_SSL_get_error / tb_ERR_peek_last_error / tb_SSL_get_current_cipher / tb_SSL_CIPHER_get_name`。
+- 初始化 `tb_SSL_library_init + tb_ERR_load_SSL_strings`；libtb_ssl **无 JNI_OnLoad**（loadLibrary false 即可）。
+- 熵源不是障碍：unidbg 0.9.8 `UnixSyscallHandler.getrandom()` 已实现（java.util.Random）。
+
+### 27.3 HttpsDirectProbe：原生 TLS 握手 + 真实 HTTPS 响应 ★PASS
+新增 `HttpsDirectProbe.java`：libc socket(AF_INET,SOCK_STREAM)+connect(203.119.204.148:443)
+→ 在 unidbg 内调 tb_SSL_* 完成 TLS 握手 → 发 HTTP GET。实测：
+```
+socket->fd=3  connect->0 cost=48ms
+TLS_client_method -> OK  SSL_CTX_new -> OK  SSL_new -> OK
+SSL_set_fd -> 1  SSL_set_tlsext_host_name(acs.m.taobao.com) -> 1
+SSL_connect -> 1 cost=146ms   version=TLSv1.3  cipher=TLS_AES_256_GCM_SHA384
+SSL_write -> 138/138  SSL_read -> 939 bytes sslError=6(ZERO_RETURN)
+HTTP/1.1 404  Server: Tengine/AServer-Ingress/3.0.46  EagleEye-TraceId: ...
+```
+**结论：ClientHello 由淘宝原生 BoringSSL 栈构造，TLS 指纹接近真机；通道完全打通。**
+
+### 27.4 HttpsMtopProbe：原生 TLS 直发真实 MTOP ★决定性证伪
+抽取可复用 `NativeTlsChannel`（socket+TLS+HTTP 收发，含 chunked/gzip 解析、ALPN 开关），
+`HttpsMtopProbe` 用 unidbg 70102 四头 + m-* 协议头族打真实网关：
+```
+[文本 MtopRecommend]   HTTP 419 FAIL_SYS_USER_VALIDATE
+   bxpunish=1 bx-action=login bx-retry=true
+   Location=...punish/14772_preview.html?wh_ttid=pc&http_referer=...
+[图片 PailitaoRecommend] 同层（独立连接后复测）
+```
+**★关键：用淘宝原生 BoringSSL TLS 栈直发，结果与 Java HttpURLConnection 完全一致
+（都是 wh_ttid=pc + USER_VALIDATE）。这直接推翻 §23.4「wh_ttid=pc 是 TLS ClientHello 指纹」
+的假设——单纯换 TLS 栈无法改变判定。**
+
+### 27.5 ALPN/HTTP2 深挖（补充证据，未转成通路）
+- `-Dtls.alpn=h2` 协商成功：服务端返回 HTTP/2 SETTINGS 帧（`00 00 12 04 ...`），
+  证实真机 anetwork 栈走 HTTP/2。
+- 手写 HTTP/2 帧封装（`Http2Framer`：preface/SETTINGS/HPACK HEADERS/DATA）+ `H2MtopProbe`：
+  最小 GET 也收到服务端 `GOAWAY error=0x1(PROTOCOL_ERROR)`，last_stream_id=0
+  （连接级拒绝，发生在 stream 处理前）。分阶段握手（读服务端 SETTINGS→回 ACK→发 HEADERS）亦然。
+- 手工 HPACK + Tengine 的 HTTP/2 严格校验成本高、收益低：**因 §27.4 已证 TLS 栈不是瓶颈，
+  HTTP/2 帧层面也不太可能改变 wh_ttid 判定，此路降级暂停。**
+
+### 27.6 wh_ttid=pc 根因再修正
+- smali 全量搜索 `wh_ttid` **无任何命中** → 它不是客户端构造的字段，
+  是 bixi 服务端 punish 页 URL 的固定 query 参数。
+- 结合 §27.4：换 TLS 栈无效、设备态伪装无效（§23）、换签名源无效（§19）、真机 IP 无效（§22），
+  剩余最可能变量是**账号/会话态与服务端 bixi 信誉**（需有效 cookie/x5sec 或白名单设备），
+  而非任何客户端可伪造的传输/协议/签名特征。
+- **务实结论**：图片搜索免登录靠纯客户端模拟（无论 Java HTTP / 原生 TLS / HTTP2）短期难突破；
+  文本搜索已由 watchcat 静态 CDN 解决。原生 TLS 通道本身作为「更接近真机的发包底座」保留，
+  未来若拿到有效会话 cookie 可直接复用 `NativeTlsChannel` 接入。
+
+### 27.7 本轮新增/改动文件
+- `src/test/java/.../probe/HttpsDirectProbe.java`（原生 TLS 握手验证，PASS）
+- `src/test/java/.../probe/NativeTlsChannel.java`（可复用原生 TLS+HTTP 通道）
+- `src/test/java/.../probe/HttpsMtopProbe.java`（HTTP/1.1 直发 MTOP，证伪）
+- `src/test/java/.../probe/Http2Framer.java` + `H2MtopProbe.java`（HTTP/2 尝试，GOAWAY 降级）
+
+---
+
+## 28. ★★★ 决定性突破：wh_ttid=pc 根因是 x-umt 全零（不是传输层/设备态/IP）（2026-11-24）
+
+### 28.1 突破过程：header 变体矩阵（NativeHeaderMatrix.java）
+用原生 TLS 通道跑 header 变体矩阵，隔离 bixi 触发源：
+| 变体 | header | 结果 | bixi? |
+|---|---|---|---|
+| full | 四头(SG值) + m-* + 真机公共参数 | `USER_VALIDATE` | **是** wh_ttid=pc |
+| native | 仅真机公共参数，无四头无 m-* | `PROTOVER_MISSED` | 否 |
+| native_m | m-* 无四头 | `ILEGEL_SIGN` | 否 |
+| native_s | 四头 + 部分，无 m-* | `USER_VALIDATE` | **是** |
+| m_x_wua | 只加 x-mini-wua + m-* | `ILEGEL_SIGN` | 否 |
+| m_x_sgext | 只加 x-sgext + m-* | `ILEGEL_SIGN` | 否 |
+| **m_x_sign** | 只加 x-sign(SG值) + m-* | `USER_VALIDATE` | **是** |
+| **m_x_umt** | 只加 x-umt(SG值) + m-* | `USER_VALIDATE` | **是** |
+| **m_x_umt_real** | 只加 x-umt(**真机常量**) + m-* | `ILEGEL_SIGN` | **否！** |
+
+### 28.2 ★根因锁定
+- 打印 SG 产出：`x-umt(SG) = 000000000000000000000000`（**全零**）。
+- **触发 bixi 的是 x-sign / x-umt 这两个头，且取决于 x-umt 的值**：
+  - `x-umt=全零`（SG 产出）→ 网关判定伪造 token → bixi 登录墙 wh_ttid=pc
+  - `x-umt=真机常量 nQkBd8pL...` → bixi **完全消失**，落到纯签名层 `ILEGEL_SIGN`
+- 推翻历史所有假设：§23「wh_ttid=pc 是 TLS/HTTP2 传输层指纹」、§22「设备态」、
+  §21「出口 IP」——全错。**真正根因是一个全零的 x-umt 头**。
+- 为何 `UnidbgMtopSigner` 有全零替换逻辑却无效：AppGatewayScan / HttpsMtopProbe /
+  NativeHeaderMatrix 都直接调 `SecurityGuardEngine.sign()`，绕过了 `UnidbgMtopSigner`
+  的替换层，把全零 x-umt 直接发出去了。
+
+### 28.3 剩余问题与下一步
+- 换成真机 x-umt 后 bixi 消失，但 `form.sign`（SG 的 x-sign）校验失败 → `ILEGEL_SIGN`。
+- 根因链条：SG SO 读不到本地 umid token（故 x-umt 全零），其产出的 x-sign 也可能
+  与该 token 绑定 → 用真机 umt 替换头后，x-sign 与 umt 不匹配 → ILEGEL_SIGN。
+- **下一步**：①让 SG SO 在 unidbg 内读到真机 umt，从源头产出匹配的 x-sign+x-umt；
+  ②或找到真机原生栈实际使用的签名机制（§13.1 buildParams 无 sign 键，
+  真机可能不用传统 x-sign，而是 umt token + native 私有签名）。
+- 2810: 用户要求继续死磕纯客户端、怀疑突破点在 tnet——本轮证实方向正确：
+  突破点确实在 SG/tnet 层的 x-umt token，而非传输层。
+
+### 28.4 二轮验证补充：x-sign 头本身触发 bixi，与 x-umt 值无关
+- `m_x_sign`（x-sign 头 + m-*，无 x-umt 头）→ bixi
+- `m_sign_umtreal`（x-sign 头 + x-umt 真机值 + m-*）→ **仍 bixi**
+- `best`（x-mini-wua + x-sgext + x-umt 真机值 + m-*，**无 x-sign 头**）→ ILEGEL_SIGN，**无 bixi**
+- 结论：**x-sign 头 + x-umt 全零头二者任一出现即触发 bixi**。最佳 header 集 = 真机 umt +
+  wua/sgext + m-*，不含 x-sign 头。剩余只剩 `form.sign` 合法性（ILEGEL_SIGN）问题。
+- SG 产出 x-umt 全零根因：unidbg 内 UMID 组件未初始化（smali `IUMIDComponent.getSecurityToken()`），
+  x-umt 由 SG native 从 umid token 派生。真机 umt 是 24 位 base64 设备标识。
+
+### 28.5 ★x-sign 本身是垃圾签名（决定性证据）
+dump 真实产出的 x-sign：
+```
+azYBCM007xAAt1eNw0JGYuKnc9XHl1eHX+jnseeHV4dUhFSEVIRUhFSEVIRUhFSEVIRUhFSEVIRXjZDzB52QgwYzARdXilPXZ5dXh1
+```
+中间有超长重复模式 `dUhFSEVIRUhFSEVIRU...`（= base64 的 "HEIHEIHEI..." 循环填充）。
+说明 SG native 内部 token/密钥区未初始化（UMID 缺失），产出的 x-sign 是**垃圾数据**，
+这才是 ILEGEL_SIGN 的真正根因——不是 data 封装、不是 session。
+**纯客户端突破的关键 = 让 SG native 拿到真机 umid token，产出合法 x-sign + x-umt。**
+
+### 28.6 ★smali 全量调查：m-* 头是 H5/PC 概念，原生栈绝不发送（agent 报告要点）
+- `InnerProtocolParamBuilderImpl.buildParams()`（smali_classes12，第606行）构造参数 Map：
+  utdid/uid/data/t/api/v/sid/ttid/deviceId/x-features，签名段（1402-1889）产出
+  sign/wua/x-mini-wua/umt/x-sgext/pv=6.3。
+- `InnerNetworkConverter` 静态 headerConversionMap（第24-522行）：
+  x-sign←sign, x-umt←umt, x-sgext, x-mini-wua, x-pv←pv(6.3), x-utdid, x-devid, x-ttid, x-t,
+  f-refer, x-c-traceid, x-falco-id, user-agent ... —— 全部命中项被 buildRequestHeaders 从参数 Map REMOVE，
+  即它们是 **header，不进 form body**。
+- `AbstractNetworkConverter.buildRequestHeaders()`（第843行）确认上述 remove 语义；
+  content-type=`application/x-www-form-urlencoded;charset=UTF-8`。
+- `libxnet_next.so`（真正 native 栈）二进制字符串：有 f-refer/x-protocol/x-am-sign/x-am-code/
+  eagleeye-traceid/x-eagleeye-id/x-falco-id/f-traceId/&sign=1/&signType=noSec；
+  **无 m-sign/m-pv/m-t/x-sign/x-mini-wua/x-sgext**（这些在 Java 层加，native 透传）。
+- ★**m-\* 头 Java 与 native 两条链都不产生**，是 H5/PC MTOP 概念。手工补 m-* 等于自报 web 形态。
+- wh_ttid 唯一命中在 assets `container_newface_home_main.json`（H5/SSR 容器 URL `wh_ttid=phone`），
+  服务端 punish 页回显 wh_ttid=pc = "识别为 PC/web"。
+- f-refer 原生恒为 "mtop"（SSR 为 mtop_ssr）；两套 builder：InnerProtocolParamBuilderImpl(pv=6.3,
+  真签名) vs tb/y25(pv=6.2, sign=randomUUID)，不可混用。
+- 图片搜索 data 设备态字段（utd_id/m=api4etao/n=60/busiKey/vm=nw/biz_type=pai/setSpApp=picture/
+  sversion/musPageVersion/deviceLevel/LBS/globalLbs/editionCode/clientIrpUserParams）全在 data JSON 内。
+
+### 28.7 ★smali 结构还原：x-sign 是垃圾签名的机制确认
+- ambient agent 全量调查确认 MTOP 真实链路（纠正旧假设 "MtopBuilder→XNRequest" 不成立）：
+  MtopBuilder → InnerProtocolParamBuilderImpl.buildParams() → AbstractNetworkConverter.convert()
+  → buildRequestHeaders() → tb/h3o → tb/xb.b() → anetwork RequestImpl → tb/wb → libxnet_next.so。
+- headerConversionMap 完整映射（InnerNetworkConverter.smali:24-522）：
+  x-sid←sid, x-t←t, x-appkey←appKey, x-ttid←ttid, x-devid←deviceId, x-utdid←utdid,
+  x-sign←sign, x-nq←nq, x-nettype←netType, x-pv←pv, x-uid←uid, x-umt←umt,
+  x-mini-wua, x-app-conf-v, x-extdata, x-features, x-page-name/url, x-app-ver,
+  user-agent, x-c-traceid, x-falco-id, f-refer, x-sgext 等。
+  buildRequestHeaders (AbstractNetworkConverter.smali:843) 命中项从 form REMOVE → 只做 header。
+- 两套 builder：真签名 InnerProtocolParamBuilderImpl (pv=6.3) vs 伪签名 tb/y25
+  (pv=6.2, sign=randomUUID())。签名失败早退分支(InnerProtocolParamBuilderImpl:1648-1675)
+  返回无 sign/pv 的 Map —— 恰好等于真机 dump 观测到的键集合，印证:真机当时签名也失败了，
+  靠 xstate 兜底 umt + native 栈的 x-am-sign/x-protocol 等私有签名出数据。
+- ★native 层 (libxnet_next.so) 自动加 x-am-sign/x-am-code/x-protocol/x-eagleeye-id/
+  x-falco-id/f-refer/f-traceId + `&sign=1&signType=noSec` —— 这些是 Java 层手工构造全缺的。
+- x-umt 是 header（不进 form），签名 INPUT(tb/n9f.f) 不含 umt；umt 是服务端游客设备凭据。
+- 图片搜索 data 注入设备态字段（utd_id/rainbow/m=api4etao/n=60/busiKey/vm=nw/biz_type=pai/
+  setSpApp=picture/sversion/musPageVersion/deviceLevel/LBS/globalLbs/editionCode/
+  clientIrpUserParams）全在 data JSON 内（ImageSearchMtopUtil.smali:902 h(Map)）。
+- 关键结论转向：真机游客态能出数据很可能靠 **native 层私有签名 (x-am-sign)**，
+  而非 Java 层 x-sign（后者签名失败早退也可能发生）。突破点应在 x-am-sign 的 native 生成逻辑。
+
+### 28.8 二轮 smali 深挖结论：x-am-sign 是 native 私有签名，x-sign 垃圾是 UMID 未初始化
+- x-am-sign/x-am-code 在所有 smali 中零命中 → 由 native SDK (libsgmain/AMDC) 内部生成，
+  libxnet_next.so 只是读取它（'[AMDC] decode response error|reason=x-am-code:%s'）。
+- SG 插件 libsgmain.so 实为 Java zip（classes.dex + CERT.RSA），无 native 插件 SO，
+  故 app_SGLib/*.so 返回空占位不是垃圾签名根因。
+- 已尝试把真机 SG token rootfs dump（SG_INNER_DATA_AVMP + .ab394a9964 六个 zlib 缓存文件，
+  路径与 SG_IO trace 81 处完全匹配）经 -Dsg.rootfs=true 注入 IOResolver：
+  文件全部读到，但 x-umt 仍 000...0，x-sign 仍含 HEIHEI 重复垃圾 → 这些缓存不是 UMID token 存储。
+- UMID 组件（IUMIDComponent.getSecurityToken/initUMID）在 SecurityGuardManager.getUMIDComp()
+  的反编译工程里已被 patch 成 return null（smali 注释 REA patch: avoid native libsgmain.so SIGABRT），
+  但 unidbg 里 SG SO 的 70102 是自己算 x-umt 的，与这个 Java API 无关。
+- 剩余可行路径：①让 70102 前补充真机 observed 命令（70603/20801/13801/12611，§12.4）看能否激活
+  UMID/AMDC；②在 native 层直接 patch x-umt 输出内存（hook 70102 返回 Map 已验证能改值）；
+  ③接受 x-sign 垃圾无法在纯 unidbg 修复，转用真机 x-am-sign 直通（需设备）。
+
+### 28.9 ★最终结论：纯客户端免登录图片搜索的突破点确在 SG/x-am-sign 层，已锁定但需真机 token
+本轮（用户要求继续死磕纯客户端、怀疑突破点在 tnet）完整成果：
+1. ★推翻历史全部假设：wh_ttid=pc 不是 TLS/HTTP2 指纹、不是设备态、不是出口 IP，
+   而是 **SG 产出的 x-sign 垃圾签名 + x-umt 全零头** 触发生效的服务端判定。
+   决定性证据：header 矩阵中去掉 x-sign/x-umt 头或把 x-umt 换成真机值，bixi 立即消失。
+2. ★根因：unidbg 内 UMID 组件未初始化 → SG 70102 产出
+   x-umt=000000000000000000000000、x-sign 含 HEIHEI 重复填充垃圾。
+3. 尝试修复：真机 SG token rootfs（-Dsg.rootfs=true，81 个文件命中）无效；
+   说明 UMID token 不在这些缓存文件里，或需要完整 native UMID 组件环境。
+4. smali 全量调查证实：真机游客态出数据很可能靠 native 私有签名 x-am-sign/AMDC（libxnet_next 读取，
+   Java smali 零命中），而非 Java x-sign。补 m-* 头是错方向（H5/PC 概念）。
+5. 务实判断：纯 unidbg 客户端缺 UMID token 与 AMDC native 签名环境，短期无法产出合法签名；
+   突破点在 SG/AMDC native 层（用户直觉正确），但需真机 token dump 或有效会话 cookie 才能闭环。
+6. 保留资产：HttpsDirectProbe（原生 TLS PASS）、NativeTlsChannel、NativeHeaderMatrix、
+   FaithfulNativeProbe、NativeHeaderMatrix 全部可复用。-Dsg.trace.io/sg.rootfs 诊断开关保留。
+
+### 28.10 Explore-2 UMID 机制深挖结论（补齐最后拼图）
+- ★全零 x-umt 的确切代码来源：`smali/com/taobao/dp/DeviceSecuritySDK.smali:300`
+  `const-string v1, "000000000000000000000000"` —— 这是 Java 层 fallback，
+  当 `IUMIDComponent.getSecurityToken()` / `ICompatComponent.getCachedSecurityToken()` 不可用/抛异常时返回。
+- 真机初始化链：`tb/n9f.u(String,String)` → `IUMIDComponent.initUMID(...)` → 回调
+  `tb/n9f$a.onUMIDInitFinishedEx()` 里 `tb/inx.m("umt", token)` 写入全局配置（buildParams 的 umt 来源）。
+- UMID token 由 native 生成（`getSecurityTokenNative/initUMIDNative/getCachedSecurityToken/saveToken`，
+  UMIDComponent 字节码被加固 VM 化，无法静态反编译命令号）；Java API **无任何 setToken/inject 接口**。
+- ★真实签名走 `IUnifiedSecurityComponent.getSecurityFactors()`（plugin=middletier），
+  不是直接 doCommandNative 70102。但 init(HashMap) 只传 authCode，不含 umt；
+  其 getSecurityFactors 内部仍路由到同一 native 命令 → 我的 70102 直调等价（已核实）。
+- 真签名另有一条 `tb/n9f.l()` requestType=3 的 HMAC-SHA1（SecurityGuardParamContext），
+  与 UMID 是两套组件。
+- 已实测最后一个候选：把真机 umt 写入 `shared_prefs/umid_token_store.xml`（`UMIDToken.smali` Java 层缓存）
+  经 rootfs 注入 → x-umt 仍全零（该文件是 Java 层缓存，SG native 70102 不读）。
+- ★最终判定：纯 unidbg 客户端无法初始化 UMID/AMDC native 状态（token 由 native 运行时生成/网络获取，
+  非可回放文件；Java 层无注入 API；rootfs 全量注入 + XML 缓存均无效）。
+  x-sign 的 HEIHEI 垃圾是同一 native token 状态缺失的连带产物，事后换头无法修复。
+  要闭环只有两条：① 真机 dump 一份已初始化的 UMID/AMDC native 内存状态（需设备）；
+  ② 注入有效会话 cookie/x5sec 走服务端验证放行。纯客户端路径至此已系统性穷尽。
+
+### 28.11 ★修正：x-am-sign 不是请求签名；tnet 内不存在签名突破点
+用户追问"突破点是不是在 tnet 里"，本轮对 libxnet_next.so 做定点静态复核，结论是**不在**：
+
+1. **IDA MCP 当前不可用**：`REA_IDA_MCP_CONFIG` 未配置，Ghidra/Hopper/Kuna 也未配置。
+   改用 `tools/analysis/xnet_am_sign_xref.py`（pyelftools + 自写 AArch64 ADRP/ADD/ADR 解码，无 capstone 依赖）
+   做字符串定位与交叉引用扫描。
+
+2. **★x-am-sign / x-am-code 是 AMDC 响应头校验，不是客户端请求签名**：
+   - 字符串位于 `.rodata`：`x-am-sign@0x4219f`、`x-am-code@0x4b875`、
+     `"[AMDC] decode response error|reason=x-am-code:%s"@0x4c461`、
+     `"[AMDC] decode response error|reason=x-am-rm:%s"@0x4c916`。
+   - 同一 SO 内 AMDC 链路完整可见：`XNAmdcClient::fetch`、`/amdc/mobileDispatch`、
+     `amdc.m.taobao.com / amdc.wapa.taobao.com / amdc.taobao.net`、
+     `XNAmdcDecoder`、`XNAmdcResponseHeaders`、`amdc.cfg`、`&sign=1`。
+   - AMDC = 阿里云移动调度/动态加速，下发 IP 与代理配置；x-am-* 用于校验**服务端返回**。
+   - `.text` 内对这几个字符串的 ADRP/ADR 交叉引用均为空（只有日志/异常路径引用），
+     进一步说明它不是每次请求都参与签名的热路径。
+   - **修正 §28.7–§28.9 中"真机靠 native 私有签名 x-am-sign 出数据"的推断**：该推断不成立。
+
+3. **xstate 也不是 token**：smali 中 `mtopsdk/xstate/XStateDelegate`、`tb/jnx` 是 mtopsdk 的
+   Java 全局状态容器（网络状态、ttid 等）；`tb/inx.m("umt", token)` 只是把 umt 写进这个 Map。
+   §28.7 所谓"xstate 兜底 umt"不等于新的签名来源。
+
+4. **H5 图搜页无静态兜底**：`https://h5.m.taobao.com/tusou/index.html` 实测 200/7976B，
+   内容是"拍立淘"介绍页（seajs + `p_introPage_index.js`），无 `__INITIAL_STATE__`、无商品数据；
+   `m.taobao.com/video_imagesearch` 302 到错误页。图搜不像文本搜索那样存在 watchcat 静态 CDN。
+
+5. **最终判定**：tnet/xnet 层只负责连接、路由（含 AMDC）与传输，不生成 MTOP 业务签名；
+   用户怀疑的"tnet 层突破点"实际位于更上层的 SG/UMID native token 初始化。
+   该状态无法由静态文件、rootfs 注入或 Java API 重建，纯客户端路线到此确认为闭环穷尽。
+   新增诊断资产：`tools/analysis/xnet_am_sign_xref.py`。

@@ -84,9 +84,21 @@ public class SecurityGuardEngine {
         emulator.getSyscallHandler().addIOResolver(new IOResolver<AndroidFileIO>() {
             @Override
             public FileResult<AndroidFileIO> resolve(Emulator<AndroidFileIO> emu, String path, int oflags) {
+                if (Boolean.getBoolean("sg.trace.io")) {
+                    System.out.println("[SG_IO] oflags=" + oflags + " path=" + path);
+                }
                 File f = mapFile(path, soPath, apkPath, mainZipPath, totemPath);
                 if (f != null && f.exists()) {
                     return FileResult.success(new SimpleFileIO(oflags, f, path));
+                }
+                // 真机 SG token 缓存 rootfs：让 SG native 读到真实 umid/token 数据，
+                // 从源头产出合法 x-sign + x-umt（默认关闭，用 -Dsg.rootfs=true 开启）
+                if (Boolean.getBoolean("sg.rootfs")) {
+                    File rf = mapRootfs(path);
+                    if (rf != null && rf.isFile()) {
+                        if (Boolean.getBoolean("sg.trace.io")) System.out.println("[SG_IO] ROOTFS HIT " + path);
+                        return FileResult.success(new SimpleFileIO(oflags, rf, path));
+                    }
                 }
                 if (path.contains("app_SGLib") && path.endsWith(".so")) {
                     return FileResult.success(new ByteArrayFileIO(oflags, path, new byte[0]));
@@ -110,6 +122,20 @@ public class SecurityGuardEngine {
         log.info("SecurityGuard SO 加载完成 base=0x{} JNI_OnLoad OK", Long.toHexString(module.base));
 
         jnicLibrary = vm.resolveClass("com/taobao/wireless/security/adapter/JNICLibrary");
+    }
+
+    /** 把 /data/user/0/com.taobao.taobao/... 映射到 target/rootfs/default/ 下的真机 dump。 */
+    private static File mapRootfs(String path) {
+        String root = System.getProperty("sg.rootfs.dir", "target/rootfs/default");
+        String rel = path;
+        if (path.startsWith("/data/user/0/com.taobao.taobao/")) {
+            rel = "data/user/0/com.taobao.taobao/" + path.substring("/data/user/0/com.taobao.taobao/".length());
+        } else if (path.startsWith("/data/data/com.taobao.taobao/")) {
+            rel = "data/user/0/com.taobao.taobao/" + path.substring("/data/data/com.taobao.taobao/".length());
+        } else {
+            return null;
+        }
+        return new File(root + "/" + rel);
     }
 
     private static File mapFile(String path, String soPath, String apkPath,

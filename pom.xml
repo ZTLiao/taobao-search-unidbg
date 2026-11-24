@@ -85,10 +85,13 @@
             <artifactId>keystone</artifactId>
             <version>0.9.5</version>
         </dependency>
+        <!-- unidbg 0.9.8 的自校验/反汇编逻辑依赖 capstone/api/DisassemblerFactory，
+             该类从 capstone 3.1.x 才存在；3.0.11 会在 native 反汇编路径抛
+             NoClassDefFoundError，故升级到 3.1.8 -->
         <dependency>
             <groupId>com.github.zhkl0228</groupId>
             <artifactId>capstone</artifactId>
-            <version>3.0.11</version>
+            <version>3.1.8</version>
         </dependency>
         <dependency>
             <groupId>com.github.zhkl0228</groupId>

@@ -1,8 +1,0 @@
-// func Java_com_alibaba_wireless_security_middletierplugin_open_fc_FCComponent_nativeOnPreActionCallback @ 0xe7428
-// imports: EXPORT:Java_com_alibaba_wireless_security_middletierplugin_open_fc_FCComponent_nativeOnPreActionCallback
-
-void Java_com_alibaba_wireless_security_middletierplugin_open_fc_FCComponent_nativeOnPreActionCallback()
-{
-  _ReadStatusReg(TPIDR_EL0);
-  JUMPOUT(0xE74A0);
-}

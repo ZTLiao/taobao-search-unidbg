@@ -79,7 +79,7 @@ public class TaobaoJni extends AbstractJni {
                 // SDK 内部加载版本号（对齐 6.8.261102 的 010102 分发码）
                 return 10102;
             case "android/os/Build$VERSION->SDK_INT:I":
-                return 31; // Android 12，与 10101 参数 "12" 对齐
+                return 33; // Android 13，与 UA(Android;13) / 10101 init 参数 "13" / VERSION.RELEASE 对齐
             default:
                 return super.getStaticIntField(vm, dvmClass, signature);
         }
@@ -91,7 +91,34 @@ public class TaobaoJni extends AbstractJni {
             case "com/alibaba/wireless/security/mainplugin/SecurityGuardMainPlugin->sLoadVersion:I":
                 return DvmInteger.valueOf(vm, 10102);
             case "android/os/Build$VERSION->SDK_INT:I":
-                return DvmInteger.valueOf(vm, 31);
+                return DvmInteger.valueOf(vm, 33);
+            // ===== Build 设备指纹：补齐后 SG 采集到完整量产机画像，不再是空/unknown =====
+            case "android/os/Build->MANUFACTURER:Ljava/lang/String;":
+                return new StringObject(vm, BUILD_MANUFACTURER);
+            case "android/os/Build->BRAND:Ljava/lang/String;":
+                return new StringObject(vm, BUILD_BRAND);
+            case "android/os/Build->MODEL:Ljava/lang/String;":
+                return new StringObject(vm, BUILD_MODEL);
+            case "android/os/Build->DEVICE:Ljava/lang/String;":
+                return new StringObject(vm, BUILD_DEVICE);
+            case "android/os/Build->PRODUCT:Ljava/lang/String;":
+                return new StringObject(vm, BUILD_PRODUCT);
+            case "android/os/Build->BOARD:Ljava/lang/String;":
+                return new StringObject(vm, BUILD_BOARD);
+            case "android/os/Build->HARDWARE:Ljava/lang/String;":
+                return new StringObject(vm, BUILD_HARDWARE);
+            case "android/os/Build->FINGERPRINT:Ljava/lang/String;":
+                return new StringObject(vm, BUILD_FINGERPRINT);
+            case "android/os/Build->ID:Ljava/lang/String;":
+                return new StringObject(vm, BUILD_ID);
+            case "android/os/Build->DISPLAY:Ljava/lang/String;":
+                return new StringObject(vm, BUILD_DISPLAY);
+            case "android/os/Build->SERIAL:Ljava/lang/String;":
+                return new StringObject(vm, "unknown");
+            case "android/os/Build$VERSION->RELEASE:Ljava/lang/String;":
+                return new StringObject(vm, "13");
+            case "android/os/Build$VERSION->INCREMENTAL:Ljava/lang/String;":
+                return new StringObject(vm, "V14.0.5.0.TKQCNXM");
             default:
                 return super.getStaticObjectField(vm, dvmClass, signature);
         }
@@ -168,6 +195,23 @@ public class TaobaoJni extends AbstractJni {
     // ===== 真机环境画像（路径需与 10101 init 参数同域）=====
     public static final String DATA_DIR = "/data/user/0/com.taobao.taobao";
     public static final String CODE_PATH = "/data/app/~~9j0QgXp3hA0yWk1VcJ2ZPw==/com.taobao.taobao-VeK8mPqLr2XwYz0aB1cD6e==/base.apk";
+
+    // ===== Build 设备指纹（量产真机画像）=====
+    // SG 的 DeviceInfoCapturer 采集设备指纹时会读 android.os.Build.* 静态字段。
+    // 之前未补这些字段，JNI 回调落到 super 抛异常/返回空 -> 设备画像为空 ->
+    // bixi 判定为非真机环境（wh_ttid=pc）。用与 UA 一致的量产机画像补齐，
+    // 消除 sdk_gphone/unknown/empty 等模拟器特征。
+    public static final String BUILD_MANUFACTURER = "Xiaomi";
+    public static final String BUILD_BRAND = "Xiaomi";
+    public static final String BUILD_MODEL = "22081212C";
+    public static final String BUILD_DEVICE = "duchamp";
+    public static final String BUILD_PRODUCT = "duchamp_global";
+    public static final String BUILD_BOARD = "sm8250";
+    public static final String BUILD_HARDWARE = "qcom";
+    public static final String BUILD_FINGERPRINT =
+            "Xiaomi/duchamp_global/duchamp:13/TKQ1.221114.001/V14.0.5.0.TKQCNXM:user/release-keys";
+    public static final String BUILD_ID = "TKQ1.221114.001";
+    public static final String BUILD_DISPLAY = "V14.0.5.0.TKQCNXM";
 
     @Override
     public boolean callStaticBooleanMethod(BaseVM vm, DvmClass dvmClass, String signature, VarArg varArg) {

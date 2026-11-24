@@ -103,10 +103,15 @@ public class HumanBehaviorSimulator {
         return Base64.getUrlEncoder().withoutPadding().encodeToString(b);
     }
 
-    /** 真机 mtopsdk UA（含机型），app 协议必须使用此形态 */
+    /**
+     * 真机 mtopsdk UA（含机型），app 协议必须使用此形态。
+     * 默认 UA 用量产真机画像，绝不能含 sdk_gphone / emulator / x86 等模拟器标识 ——
+     * 这些是 bixi/TMD 在 HTTP 头层判定「非真机」（wh_ttid=pc）的直接特征。
+     * 接了真机 frida bridge 时 adoptRemoteDevice() 会用 RPC 同步的 UA 覆盖本默认值。
+     */
     public String appUa() {
         return notEmpty(sessionAppUa) ? sessionAppUa
-                : "MTOPSDK/3.1.1.7 (Android;15;Google;sdk_gphone64_arm64) DeviceType(Phone)";
+                : "MTOPSDK/3.1.1.7 (Android;13;Xiaomi;22081212C) DeviceType(Phone)";
     }
 
     public String randomUtdid() { return generateUtdid(); }

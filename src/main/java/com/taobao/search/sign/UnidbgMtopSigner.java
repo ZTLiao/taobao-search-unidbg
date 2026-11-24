@@ -3,6 +3,7 @@ package com.taobao.search.sign;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
 import org.springframework.stereotype.Component;
 
@@ -23,6 +24,15 @@ import java.util.Map;
 public class UnidbgMtopSigner implements MtopSigner {
 
     private static final Logger log = LoggerFactory.getLogger(UnidbgMtopSigner.class);
+
+    /**
+     * 真机 umid 设备 token（与 HTTP 头 umt 同源）。
+     * unidbg 内 SG 读不到本地 token 时 x-umt 会返回全零 24 位——这是最明显的
+     * 「非真机」特征（服务端能直接从 x-umt 全零判定模拟环境）。此处用配置的
+     * 真机 umt 覆盖 x-umt，使签名结果头与 HTTP umt 头一致。
+     */
+    @Value("${mtop.umt:}")
+    private String deviceUmt;
 
     private volatile SecurityGuardEngine engine;
 
@@ -66,6 +76,15 @@ public class UnidbgMtopSigner implements MtopSigner {
             throw new IllegalStateException("unidbg 70102 签名返回空，请查看探针日志");
         }
         Map<String, String> result = new HashMap<String, String>(headers);
+        // 消除 x-umt 全零特征：SG 在无本地 token 时产出 0000...0000，
+        // 用真机 umt 覆盖，保证 x-umt 头 == umt 头（真机二者同源）。
+        if (deviceUmt != null && !deviceUmt.trim().isEmpty()) {
+            String xUmt = result.get("x-umt");
+            if (xUmt == null || xUmt.matches("0+")) {
+                result.put("x-umt", deviceUmt.trim());
+                log.debug("x-umt 全零已替换为真机 umt len={}", deviceUmt.trim().length());
+            }
+        }
         log.info("unidbg 签名完成 api={} utdid.len={} deviceId.len={} x-sign.len={} sgext.len={} wua.len={}",
                 api, c.getUtdid().length(), c.getDeviceId().length(),
                 result.getOrDefault("x-sign", "").length(),
