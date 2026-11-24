@@ -9,10 +9,10 @@ PORT_BRIDGE=9091
 PY="$(command -v python3 || true)"
 if [ -z "$PY" ]; then echo "ERROR: python3 不可用" >&2; exit 1; fi
 if [ -z "${JAVA_HOME:-}" ] || [ ! -x "$JAVA_HOME/bin/java" ]; then
-  for CAND in "/c/Program Files/Java/jdk-1.8" \
-              "/Users/liaozetao/Library/Java/JavaVirtualMachines/corretto-1.8.0_452/Contents/Home"; do
-    if [ -x "$CAND/bin/java" ]; then export JAVA_HOME="$CAND"; break; fi
-  done
+  JAVABIN="$(command -v java 2>/dev/null || true)"
+  if [ -n "$JAVABIN" ]; then
+    export JAVA_HOME="$(dirname "$(dirname "$JAVABIN")")"
+  fi
 fi
 JAR=target/taobao-search-unidbg-1.0.0.jar
 JAVA_BIN="${JAVA_HOME:+$JAVA_HOME/bin/java}"

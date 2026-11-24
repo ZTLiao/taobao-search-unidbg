@@ -20,12 +20,11 @@ import java.util.Map;
 public class SignEngineRegression {
 
     public static void main(String[] args) {
-        String res = "src/main/resources/native";
         SecurityGuardEngine engine = SecurityGuardEngine.getInstance(
-                res + "/arm64-v8a/libsgmainso-6.8.261102.so",
-                "/Users/liaozetao/Projects/ReaProjects/app/com.taobao.taobao.apk",
-                res + "/arm64-v8a/libsgmain.so",
-                res + "/totem/yw_1222.jpg",
+                com.taobao.search.sign.SgPaths.SO,
+                com.taobao.search.sign.SgPaths.officialApk(),
+                com.taobao.search.sign.SgPaths.MAIN_ZIP,
+                com.taobao.search.sign.SgPaths.TOTEM,
                 TaobaoConstants.APP_KEY,
                 TaobaoConstants.APP_VERSION,
                 false);

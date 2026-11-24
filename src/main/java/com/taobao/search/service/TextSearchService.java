@@ -28,7 +28,10 @@ public class TextSearchService {
     @Autowired(required = false)
     private NativeSearchClient nativeSearch;
 
-    /** 协议模式：native=App 原生栈免登录；app=真机 data 结构手工 form；h5=标准网关 */
+    @Autowired(required = false)
+    private WatchcatFallbackClient watchcat;
+
+    /** 协议模式：watchcat=静态兜底CDN（免登录首选）；native=App 原生栈免登录；app=真机 data 结构手工 form；h5=标准网关 */
     @Value("${mtop.protocol:h5}")
     private String protocol;
 
@@ -37,6 +40,14 @@ public class TextSearchService {
             return ApiResponse.fail(TaobaoConstants.API_TEXT_SEARCH,
                     "local", "关键词 q 不能为空");
         }
+
+        // watchcat 静态兜底 CDN：唯一稳定、免登录、无需签名/设备指纹的真实数据通道。
+        // 逆向来源 tb/b54.smali（HOOK_GUIDE §21）。失败时回退到其它协议栈。
+        if ("watchcat".equalsIgnoreCase(protocol) && watchcat != null && watchcat.isEnabled()) {
+            ApiResponse r = watchcat.search(req.getQ().trim(), req.getPage());
+            if (r != null && r.isSuccess()) return r;
+        }
+
         boolean nativeMode = "native".equalsIgnoreCase(protocol);
         boolean appMode = "app".equalsIgnoreCase(protocol) || nativeMode;
         String api = appMode ? TaobaoConstants.API_TEXT_SEARCH_NATIVE : TaobaoConstants.API_TEXT_SEARCH;

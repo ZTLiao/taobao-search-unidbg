@@ -179,7 +179,7 @@ public class SecurityGuardEngine {
     }
 
     private String soPathOf() {
-        return "src/main/resources/native/arm64-v8a/libsgmainso-6.8.261102.so";
+        return SgPaths.soPath();
     }
 
     /**

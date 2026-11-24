@@ -1,0 +1,63 @@
+{
+ "error": null,
+ "step": "done",
+ "instanceId": "INNER",
+ "instanceSource": "live-context",
+ "instanceScore": 240,
+ "instanceCandidates": [
+  {
+   "id": "INNER",
+   "ttid": "231200@taobao_android_10.69.0",
+   "utdidLen": 24,
+   "inited": false,
+   "source": "live-context",
+   "score": 240
+  },
+  {
+   "id": "MTOP_ID_ELEME",
+   "ttid": "231200@taobao_android_10.69.0",
+   "utdidLen": 24,
+   "inited": false,
+   "source": "live-context",
+   "score": -860
+  },
+  {
+   "id": "MTOP_ID_XIANYU",
+   "ttid": "231200@taobao_android_10.69.0",
+   "utdidLen": 24,
+   "inited": false,
+   "source": "heap",
+   "score": -900
+  },
+  {
+   "id": "MTOP_ID_SSR_ELEME",
+   "ttid": "231200@taobao_android_10.69.0",
+   "utdidLen": 24,
+   "inited": false,
+   "source": "heap",
+   "score": -900
+  },
+  {
+   "id": "SSR",
+   "ttid": "231200@taobao_android_10.69.0",
+   "utdidLen": 24,
+   "inited": false,
+   "source": "heap",
+   "score": 100
+  },
+  {
+   "id": "MTOP_ID_KOUBEI",
+   "ttid": "231200@taobao_android_10.69.0",
+   "utdidLen": 24,
+   "inited": false,
+   "source": "heap",
+   "score": -900
+  }
+ ],
+ "reqApi": "mtop.relationrecommend.MtopRecommend.recommend",
+ "retCode": "ANDROID_SYS_GENERATE_MTOP_SIGN_ERROR",
+ "retMsg": "服务竟然出错了",
+ "ret": null,
+ "data": null,
+ "raw": "MtopResponse[ api=mtop.relationrecommend.MtopRecommend.recommend,v=1.0,retCode=ANDROID_SYS_GENERATE_MTOP_SIGN_ERROR,retMsg=服务竟然出错了,mappingCode=0AEC40002,mappingCodeSuffix=EC40002,ret=null,data=null,responseCode=0,headerFields=null,bytedata=null]"
+}

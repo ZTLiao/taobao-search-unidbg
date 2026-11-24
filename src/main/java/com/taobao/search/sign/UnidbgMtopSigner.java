@@ -30,12 +30,11 @@ public class UnidbgMtopSigner implements MtopSigner {
         if (engine == null) {
             synchronized (this) {
                 if (engine == null) {
-                    String res = "src/main/resources/native";
                     engine = SecurityGuardEngine.getInstance(
-                            res + "/arm64-v8a/libsgmainso-6.8.261102.so",
-                            "/Users/liaozetao/Projects/ReaProjects/app/com.taobao.taobao.apk",
-                            res + "/arm64-v8a/libsgmain.so",
-                            res + "/totem/yw_1222.jpg",
+                            SgPaths.soPath(),
+                            SgPaths.officialApk(),
+                            SgPaths.mainZipPath(),
+                            SgPaths.totemPath(),
                             com.taobao.search.config.TaobaoConstants.APP_KEY,
                             com.taobao.search.config.TaobaoConstants.APP_VERSION,
                             false);

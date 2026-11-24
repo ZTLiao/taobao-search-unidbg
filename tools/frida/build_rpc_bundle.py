@@ -75,6 +75,46 @@ def main():
     mt_out = os.path.join(HERE, 'rpc_main_thread_bundle.js')
     if os.path.exists(mt_src):
         build(mt_src, mt_out, '主线程原生搜索 RPC')
+    # SG 签名 spoof：hook getPackageInfo 返回官方证书，破解 1927
+    spoof_src = os.path.join(HERE, 'sg_sigspoof.js')
+    spoof_out = os.path.join(HERE, 'sg_sigspoof_bundle.js')
+    if os.path.exists(spoof_src):
+        build(spoof_src, spoof_out, 'SG 签名 spoof')
+    # SG 读签名路径诊断（备选：判断 SG 是否 native open 读 APK）
+    rp_src = os.path.join(HERE, 'sg_readpath_probe.js')
+    rp_out = os.path.join(HERE, 'sg_readpath_probe_bundle.js')
+    if os.path.exists(rp_src):
+        build(rp_src, rp_out, 'SG 读签名路径诊断')
+    # SG native open hook：dump/重定向 base.apk 读取，破解 1927
+    no_src = os.path.join(HERE, 'sg_native_open_hook.js')
+    no_out = os.path.join(HERE, 'sg_native_open_hook_bundle.js')
+    if os.path.exists(no_src):
+        build(no_src, no_out, 'SG native open hook')
+    # SG read trace：追踪 SG 打开 base.apk 后 read/mmap/pread 的偏移与内容
+    rt_src = os.path.join(HERE, 'sg_read_trace.js')
+    rt_out = os.path.join(HERE, 'sg_read_trace_bundle.js')
+    if os.path.exists(rt_src):
+        build(rt_src, rt_out, 'SG read trace')
+    # SG 官方证书三路固定：getPackageInfo + toByteArray + native open 重定向，破解 1927
+    full_src = os.path.join(HERE, 'sg_sig_full.js')
+    full_out = os.path.join(HERE, 'sg_sig_full_bundle.js')
+    if os.path.exists(full_src):
+        build(full_src, full_out, 'SG 官方证书三路固定')
+    # SG 全量读取诊断：open/fopen/read/fread 全变体，dump 偏移和内容，判断重定向为何不够
+    rt_src = os.path.join(HERE, 'sg_read_fulltrace.js')
+    rt_out = os.path.join(HERE, 'sg_read_fulltrace_bundle.js')
+    if os.path.exists(rt_src):
+        build(rt_src, rt_out, 'SG 全量读取诊断')
+    # SG fopen 重定向：实测 SG 用 fopen 读 base.apk（旧 open hook 漏掉），这是破解 1927 的主路径
+    fo_src = os.path.join(HERE, 'sg_fopen_redirect.js')
+    fo_out = os.path.join(HERE, 'sg_fopen_redirect_bundle.js')
+    if os.path.exists(fo_src):
+        build(fo_src, fo_out, 'SG fopen 重定向')
+    # SG syscall 直调 hook：IDA 定位 6 条 svc openat + read，绕过 libc 直接读签名（用户猜测，二进制证实）
+    sy_src = os.path.join(HERE, 'sg_syscall_hook.js')
+    sy_out = os.path.join(HERE, 'sg_syscall_hook_bundle.js')
+    if os.path.exists(sy_src):
+        build(sy_src, sy_out, 'SG syscall svc hook')
 
 
 if __name__ == '__main__':

@@ -30,12 +30,11 @@ public class SmsLoginProbe {
         String step = args.length > 1 ? args[1] : "send";
         String phone = args.length > 2 ? args[2] : "13800138000";
 
-        String res = "src/main/resources/native";
         SecurityGuardEngine engine = SecurityGuardEngine.getInstance(
-                res + "/arm64-v8a/libsgmainso-6.8.261102.so",
-                "/Users/liaozetao/Projects/ReaProjects/app/com.taobao.taobao.apk",
-                res + "/arm64-v8a/libsgmain.so",
-                res + "/totem/yw_1222.jpg",
+                com.taobao.search.sign.SgPaths.soPath(),
+                com.taobao.search.sign.SgPaths.officialApk(),
+                com.taobao.search.sign.SgPaths.mainZipPath(),
+                com.taobao.search.sign.SgPaths.totemPath(),
                 APPKEY, "10.69.10", false);
         SignContext ctx = new SignContext(
                 "awJISchpPiMDADAJ3weNXszG",

@@ -43,12 +43,12 @@ public class SgProbe {
         // 预引导注入的 4.5.2 原生库会因版本不符被 JNA 5.10 拒绝。
     }
 
-    static final String RES = "src/main/resources/native";
-    static final String APK_PATH = "/Users/liaozetao/Projects/ReaProjects/app/com.taobao.taobao.apk";
-    static final String SO_PATH = RES + "/arm64-v8a/libsgmainso-6.8.261102.so";
-    static final String MAIN_ZIP = RES + "/arm64-v8a/libsgmain.so";
-    static final String TOTEM = RES + "/totem/yw_1222.jpg";
-    static final String TOTEM_MID = RES + "/totem/yw_1222_midability.jpg";
+    static final String RES = com.taobao.search.sign.SgPaths.RES;
+    static final String APK_PATH = com.taobao.search.sign.SgPaths.officialApk();
+    static final String SO_PATH = com.taobao.search.sign.SgPaths.soPath();
+    static final String MAIN_ZIP = com.taobao.search.sign.SgPaths.mainZipPath();
+    static final String TOTEM = com.taobao.search.sign.SgPaths.totemPath();
+    static final String TOTEM_MID = com.taobao.search.sign.SgPaths.totemMidPath();
 
     static final String PROCESS = "com.taobao.taobao";
     static final String PKG = "com.taobao.taobao";

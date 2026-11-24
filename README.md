@@ -176,12 +176,20 @@ curl -X POST http://127.0.0.1:9090/api/search \
 |---|---|---|
 | `h5` | `search.sign-backend=h5` | 默认。自动握手获取 token + 标准 MD5 sign |
 | `rpc` | `search.sign-backend=rpc` + `sign.rpc.url=http://.../api/sign` | 对接自建 unidbg-server / 真机 frida-rpc，拿 `x-sign` |
-| `unidbg` | `unidbg.enabled=true` + `search.sign-backend=unidbg` | 本地补环境，需按 [`docs/HOOK_GUIDE.md`](docs/HOOK_GUIDE.md) 用 verbose 日志逐条补 `TaobaoJni` |
+| `unidbg` | `unidbg.enabled=true` + `search.sign-backend=unidbg` | **开箱可用**：官方 APK + SG so/图腾已打包进 jar（`SgPaths` 自动解压到临时目录）。`SecurityGuardEngine` 模拟 SG 启动（init 链 10102/10101/10103/10104 + 70102）出真机四头，天然绕过重打包自签名 1927。可用 `-Dunidbg.apkPath=` / `TAOBAO_APK` 覆盖 APK。详见 [`docs/HOOK_GUIDE.md`](docs/HOOK_GUIDE.md) |
 | `mock` | `search.sign-backend=mock` | 离线占位 / 降级 |
 
 `search.sign-fallback=true` 时，任一后端异常自动降级到 `mock`，并在 `signMeta._fallback_reason` 记录原因。
 
 ## 七、验证记录
+
+### 2026-11-23（unidbg 内模拟 SG 启动，自包含打包）
+- 用户诉求：把 SG 安全验证代码整体复制进工程、模拟 app 启动做安全验证。**本项目即为此设计，`SecurityGuardEngine` 已实现**，本轮修复了跨机器/打包阻塞。
+- 死地址修复：新增 `SgPaths` 统一解析资源（classpath 资源解压 > 系统属性/TAOBAO_APK > 工作区相对路径），替换全部 Java 硬编码 macOS 路径与 shell 脚本死 JAVA_HOME。
+- 官方 APK 随包：`src/main/resources/native/com.taobao.taobao.apk`（91M，md5 `db87c9037f57c10e4396d71b70b4660a`），jar 141M。
+- **实测（Windows/JDK17/unicorn）**：`SgProbe all unicorn` → `JNI_OnLoad OK`，init 链 ret=0，**70102 返回完整四头 `x-sign`/`x-mini-wua`/`x-sgext`/`x-umt`，无 1927**。从非工作区目录运行（强制 jar 资源解压分支）同样成功。
+- 意义：unidbg 路线喂给 SG 官方 APK + 官方图腾，签名身份天然正确，**不受真机重打包 1927 影响**；剩余风险是网关对模拟环境设备态的风控（见风控章节），非签名层。
+- `mvn test` 全过。
 
 ### 2026-11-22（token 握手打通）
 - 新增 6 个类 / 24 个 class，`mvn package` 成功（jar 49M）。

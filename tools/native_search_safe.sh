@@ -26,10 +26,6 @@ if [ -z "$PY" ]; then echo "ERROR: python3 不可用（可设置 PYTHON_BIN）" 
 JAVA_BIN=""
 if [ -n "${JAVA_HOME:-}" ] && [ -x "$JAVA_HOME/bin/java" ]; then
   JAVA_BIN="$JAVA_HOME/bin/java"
-elif [ -x "/c/Program Files/Java/jdk-1.8/bin/java" ]; then
-  JAVA_BIN="/c/Program Files/Java/jdk-1.8/bin/java"
-elif [ -x "/Users/liaozetao/Library/Java/JavaVirtualMachines/corretto-1.8.0_452/Contents/Home/bin/java" ]; then
-  JAVA_BIN="/Users/liaozetao/Library/Java/JavaVirtualMachines/corretto-1.8.0_452/Contents/Home/bin/java"
 else
   JAVA_BIN="$(command -v java || true)"
 fi

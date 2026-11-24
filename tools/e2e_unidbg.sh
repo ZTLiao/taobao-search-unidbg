@@ -8,12 +8,9 @@
 set -u
 PROJ="$(cd "$(dirname "$0")/.." && pwd)"
 
-DEFAULT_JH=/Users/liaozetao/Library/Java/JavaVirtualMachines/corretto-1.8.0_452/Contents/HOME
 JAVA_BIN=""
 if [ -n "${JAVA_HOME:-}" ] && [ -x "$JAVA_HOME/bin/java" ]; then
   JAVA_BIN="$JAVA_HOME/bin/java"
-elif [ -x "$DEFAULT_JH/bin/java" ]; then
-  JAVA_BIN="$DEFAULT_JH/bin/java"
 else
   JAVA_BIN="$(command -v java || true)"
 fi

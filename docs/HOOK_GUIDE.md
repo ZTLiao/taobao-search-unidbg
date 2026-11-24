@@ -564,3 +564,148 @@ java -jar target/taobao-search-unidbg-1.0.0.jar \
   对比后补充 x5sec/cookie 注入，争取在风控允许窗口稳定出真实商品数据。
 - `nativeSearch` 里 Mtop 实例选择目前回退顺序 `''/INNER/taobao/21646297`，
   冷启动瞬间可能选到非主实例（曾见 MTOP_ID_ELEME）；建议按 package 主进程 instanceId 精确匹配。
+
+---
+
+## 19. unidbg 四头接真实 acs 网关：协议层打通，收敛到同一登录墙（2026-11-23）
+
+用户选「用 unidbg 引擎的方案」后，用 `AppGatewayScan` 探针（真实 unidbg 70102 四头 + acs /gw/）做分层验证。
+
+### 19.1 修正探针两个 bug（旧版卡在 ACCESS_DENIED 的根因）
+1. **m-t 写死 "1"** → 改为当前秒级时间戳 `String.valueOf(t)`。§15 早已证明 m-t 必须是真实时间戳，写死值触发 `ACCESS_DENIED/REQUEST_EXPIRED`；生产代码 `MtopHttpClient` line183 本就正确，只有临时探针错了。
+2. **搜索接口用废弃的 `mtop.taobao.wsearch.appsearch`** → 换成真机 ground truth `mtop.relationrecommend.MtopRecommend.recommend` + `requestAlias=wsearch` 完整 data（§11.2）；图片用外层封装 `{"params":"{...}","appId":"32969"}`（§17.1）。
+3. 顺带补全 form/header 与真机同源（deviceId/umt/extdata/x-features），抓全 `bxpunish/bx-action/bx-retry/Location` 风控头。
+
+### 19.2 实测结果（JDK17 +  regenerated cp.txt，unidbg SO 加载 OK）
+| case | 结果 | 分层 |
+|---|---|---|
+| suggest 无 m 头 | `FAIL_SYS_PROTOVER_MISSED::缺少协议版本(m-pv)` | L2 协议门槛（符合 §15） |
+| suggest + m 头 + 正确 m-t | `FAIL_SYS_ACCESS_DENIED::请下载升级最新版本APP` | 该老接口走另一分支，非主链路 |
+| **文本 MtopRecommend + m 头** | HTTP 419 `FAIL_SYS_USER_VALIDATE`，bx-action=login / bx-retry=true / wh_ttid=pc | **穿越协议层，落到登录墙** |
+| **图片 PailitaoRecommend + m 头** | HTTP 419 `FAIL_SYS_USER_VALIDATE`，同上 | **同一登录墙** |
+
+native 四头均完整产出：x-sign.len=102 / x-mini-wua=101 / x-sgext=380 / x-umt=24。
+
+### 19.3 决定性结论
+- unidbg 引擎的签名链路**已完整可用**：70102 出四头 + m-* 头族穿越协议层，与真机 RPC 签名（§15）落在**完全相同**的 `USER_VALIDATE` 登录墙。
+- 这从另一个独立来源再次证明：剩余阻塞是**服务端 bixi 登录/设备态校验**（wh_ttid=pc，bx-action=login），不是签名算法、不是 m-sign、不是 data 封装。换任何签名来源（unidbg/真机 RPC）结果一致。
+- 因此 unidbg 方案能达到的天花板已经触顶：**要拿真实数据只剩三条路**（均非签名层可解）：① 注入有效登录 Cookie（`POST /api/token`）；② 真机原生 anetwork 栈 + 风控允许窗口（§17.3/§18，需非 root 量产机 + frida bridge）；③ 官方开放平台 API。
+- `mvn -Dtest=SignContextTest test` PASS（REAL DEVICE INPUT MATCH OK），无回归。
+
+### 19.4 代码改动
+- `src/test/java/com/taobao/search/probe/AppGatewayScan.java`：m-t 真时间戳 + 真机搜索接口/data + 外封装图片 data + 全风控头诊断。生产代码 `MtopHttpClient` 无需改（m-* 头族本就正确）。
+
+---
+
+## 20. root 真机原生栈复验 + root 隐藏（2026-11-24，决定性）
+
+用户接入 root 真机（TrebleDroid vanilla / tdgsi_arm64_ab / Android13 API33 / Magisk v30.6，WiFi adb 端口会跳）。
+
+### 20.1 环境重建（可复现）
+- `adb root` 会把 WiFi adb 打掉并换端口 → 用线程 TCP 扫描 30000-50000 找到新端口（本次 42710→42507）。
+- 重装官方 APK（`com.taobao.taobao_10.69.0.apk`，95,212,303B，签名 `fda2e820`），启动到 TBMainActivity = 游客态（有"立即登录"banner，未登录）。
+- 设备 frida-server 17.27.4（`/data/local/tmp/frida-server`），本地 frida client 17.16.4；17.5.2 server 报 "unable to locate Android dynamic linker"，必须用 17.27.4。root attach 任意进程 OK。
+- bridge `tools/frida_rpc_bridge.py --port 9091` attach 成功，四头签名可用（x-sgext/x-mini-wua/x-gst/...）。
+
+### 20.2 三个变量逐一排除（关键）
+1. **原生栈链路可用**：`/api/search/native` 返回 instanceId=INNER / source=live-context / score=240（最优实例），说明请求 100% 走真机 anetwork 栈、真机身份、真机签名，请求真实发出（拿到 Tengine+TraceId 响应）。签名层无缺陷。
+2. **root 检测（600005）可消除**：默认 AuthSDK 报 `600005 Device has su!`。用 Magisk DenyList 解决：
+   ```
+   su -c "magisk --denylist add com.taobao.taobao"
+   su -c "magisk --denylist enable"     # 注意是 enable 不是 enforce
+   # force-stop + 重启淘宝后生效；magisk --denylist exec 验证 SU_HIDDEN
+   ```
+   重启后 logcat 不再有 600005，`magisk --denylist status`=enforced。但 USER_VALIDATE **仍在** → 600005 不是本次 USER_VALIDATE 的触发源。
+3. **风控状态污染是主因**：每次 native search 都拉起 `CheckCodeValidateActivity`（bixi 惩罚/冷却页）。`pm clear` + 60s 冷却后重试仍 USER_VALIDATE。清数据后设备身份被重置（utdid `awJ3hY/Mq3EDAMWt0Bs6MAqV`→`awT8u+pBXpwDAP6DXvILEyAU`，ttid 10.69.10→10.69.0，umt/deviceId 全变）= **全新低信誉设备身份**，bixi 设备信誉是随使用累积的，重置反而归零。
+
+### 20.3 决定性证据链（免登录逻辑成立，卡点纯服务端设备信誉）
+- `docs/real_iphone18_search.png`（11-23 10:31，本设备）显示**真实 iPhone 18 商品+价格（¥9999/¥11999/¥21499）**，游客态（accessToken/authCode/userInfo=DEFAULT、无 Cookie、useCache=false，§11.4）。证明免登录文本搜索在此设备/此逻辑下客观可出真实数据。
+- 今天同样逻辑在高频 + root 标记 + 身份重置后稳定 USER_VALIDATE。UI 点搜索框 / scheme `taobao://s.taobao.com/search?q=iphone18` 均直接跳 UserLoginActivity。
+- 结论：**免登录搜索的"逻辑"已完全明确且代码已实现**（§18.3 三层：真机 MtopBuilder 原生栈 + bridge `/api/search/native` + `NativeSearchClient`）。能否出数据只取决于**服务端 bixi 对该设备身份的实时信誉判定**，非签名/非请求形态/非登录账号。这是服务端黑盒，工程侧无法强制。
+
+### 20.4 落地状态 / 后续可行路径
+- 代码：`nativeSearch` export（显式 MtopRequest 重载 + POST + syncRequest）、bridge native 路由、`NativeSearchClient`、`TextSearchService`/`ImageSearchService` native 分支均已就位并编译通过。
+- 要稳定出真实数据只剩：① **让设备身份"养号"**（保持 DenyList 隐藏 root、低频、正常使用首页/搜索几天，累积 bixi 信誉），再用 native 栈低频搜；② 换**从未 root、从未高频测试的非 root 量产真机**（最干净）；③ 自持登录 Cookie / 官方开放平台 API（非免登录）。
+- 环境：设备当前 DenyList 已强制隐藏 root、官方 APK、frida 17.27.4、bridge 在 9091 运行；如需继续验证直接调 `/api/search/native`。
+
+---
+
+## 21. ★决定性突破：文本搜索静态兜底 CDN，免登录稳定出真实数据（2026-11-24）
+
+### 21.1 发现（smali 静态逆向）
+`tb/b54.smali:337-427`（搜索数据源 tb/h1i 的父类）实现 mtop 请求失败时的兜底：
+```
+key  = "66_30.4" + q + page
+hash = md5(key) 小写十六进制     # tb/e4p.a → b[MD5] → d[hex]，已逐方法核对 smali
+url  = "https://cdn-watchcat.s.taobao.com/watchcat-z-66/" + hash + ".json"
+```
+这是**纯静态 CDN**，无需签名 / 设备指纹 / Cookie / 登录态，也不经过 bixi 风控。
+
+### 21.2 实测验证（HTTP + Java 双重）
+- `curl` / Python urllib：多关键词（iphone18/iphone/连衣裙/wireless mouse）、多分页全部 HTTP 200，返回 116KB JSON，含 `totalResults / itemsArray / templates / pageInfo`。
+- 商品真实性：`title="Apple/苹果 iPhone 18 Pro"`、`price="9999.00"`、`pic_path=...`、`uniqpid=1002345379`，与 `docs/real_iphone18_search.png` 截图价格完全一致。
+- 商品字段：`title / price / priceShow / pic_path / imageInfo / uniqpid / auctionURL / short_title`。
+
+### 21.3 落地代码
+- 新增 `service/WatchcatFallbackClient.java`：`buildUrl(q,page)` + `search(q,page)`，MD5 构造 URL、fastjson 解析、归一化商品字段为 title/price/picUrl/itemId。
+  - 环境适配：该 CDN 公开只读、无凭据；本机有 MITM 代理 CA 不在 JDK trust store，故**仅对该连接**放宽证书校验（不影响其它 HTTPS）。
+- `TextSearchService.search()`：`mtop.protocol=watchcat` 时优先走此通道，失败回退其它栈。
+- `application.properties`：`search.watchcat.enabled=true` / `search.watchcat.timeout-ms=15000`。
+- 新增 `probe/WatchcatRegression.java`：3 关键词回归全 PASS。
+- 现有回归无影响：`SignContextTest` PASS、`e2e_test.sh` 5 success / sign_reject=0。
+
+### 21.4 使用方式
+```bash
+# 直接跑回归探针（无需 Spring / 设备）
+CP=$(cat target/cp.txt); javac -cp "target/classes:$CP" -d target/test-classes src/test/java/com/taobao/search/probe/WatchcatRegression.java
+java -cp "target/classes:target/test-classes:$CP" com.taobao.search.probe.WatchcatRegression
+# 服务启用：启动参数加 --mtop.protocol=watchcat
+POST /api/search  {"q":"iphone18","page":1}
+```
+
+### 21.5 图片搜索：无对应兜底（已证伪）
+- 静态扫描 `smali_classes4/com/etao/feimagesearch/` + `tb/u7j/pft/ovn/rxx`：`watchcat` / `requestFallback` / `e4p.a` 均 0 匹配；图片结果唯一来源是 `mtop.relationrecommend.PailitaoRecommend.recommend`。
+- 探测 zone=32969 / key 变体全部 404，`watchcat-z-66` 仅服务文本主搜。
+- 图片搜索更轻的链路：用 `searchimg`（图片 URL）代替 `strimg`（base64），同一 mtop 接口但省去本地压缩上传（smali `tb/pft.smali:578-597`、`tb/ovn.d()`）。结果仍需 mtop 通道，无静态兜底。
+- 图片免登录只能靠真机原生栈（§17.3/§18）或登录 Cookie / 官方 API。
+
+### 21.6 结论
+**文本搜索免登录问题已彻底解决**：watchcat 静态兜底 CDN 稳定返回真实商品，无需任何签名/设备/登录。
+**图片搜索免登录仍受 bixi 风控限制**，无静态捷径。
+
+---
+
+## 22. watchcat 回归体系固化 + 图片间接方案证伪（2026-11-24）
+
+### 22.1 回归覆盖扩展
+`probe/WatchcatRegression.java` 从 3 关键词单页扩展为三层校验：
+1. **离线 MD5 向量**：`iphone18/iphone/连衣裙` 的 `buildUrl()` 与 11-23 实测 hash 逐字节比对 → 3/3 MATCH。
+2. **离线回退契约**：`enabled=false` 时 `search()` 必须返回 `null`，供 `TextSearchService` 回退 native/app/h5 → PASS。
+3. **在线真实商品矩阵**：`iphone18/p1`、`iphone18/p2`、`iphone/p1`、`连衣裙/p1` 为硬性；`iPhone 18 Pro`（带空格+大小写混合）、`不存在的商品xyzzy` 为信息性。
+   - 新发现：**page=2 有独立数据**（hash `5c515724ef3e6b689f5b71d177ac3f16`，total≈57893），分页可用。
+   - 新发现：**带空格/大小写混合的关键词也能命中**（`iPhone 18 Pro` → 11 条，说明 CDN 预置库按原样 q 建索引，无需归一化）。
+   - 冷门词 CDN 返回 HTTP 404，客户端正确返回 `null` 走回退，不算回归失败。
+
+### 22.2 端到端脚本固化
+新增 `tools/e2e_watchcat.sh`，一键完成：compile → 探针 → 独立 SpringBoot（默认 `:9097`，避开手动演示的 9096）→ `/api/search` 三请求 → Python 断言 `success/gatewayRet/signBackend/ret/items/title/signMeta._watchcat_key/requestUrl`。
+实测输出：
+```
+WATCHCAT_REGRESSION=PASS
+PROBE_RC=0
+PASS iphone18/p1   backend=watchcat-static-cdn items=14 key=66_30.4iphone181
+PASS iphone18/p2   backend=watchcat-static-cdn items=14 key=66_30.4iphone182
+PASS 连衣裙/p1      backend=watchcat-static-cdn items=17 key=66_30.4连衣裙1
+HTTP_ASSERT=PASS
+E2E_WATCHCAT_RESULT=PASS
+```
+
+### 22.3 图片搜索「图→词→文本 CDN」间接方案：证伪
+静态逆向（只读核查 smali）三条路线逐一排除：
+
+1. **无独立图像识别接口**：拍立淘识别完全在服务端完成，全流程只调 `mtop.relationrecommend.PailitaoRecommend.recommend`（`com/etao/feimagesearch/util/ImageSearchMtopUtil.smali:2990`，`tb/lg4.smali:2165,3878`，`tb/rxx.smali:396`）。`associated_words_api` 虽名字相关，但入参是文本 `word`/`textSearchQuery`（同文件 :2940/:2981），apiName 仍是 recommend，属文本联想词组件，不是图→词接口。全目录无 `ocr` / `recognize` / `classify` / `img2text` 独立 mtop api。
+2. **无 URL 图片→文本静态端点**：`strimg` / `watermarkStrimg` / `searchimg` / `image_search` 均为 component / pssource 参数取值，不是端点；静态资源中唯一相关 API 是 `mtop.relationrecommend.wirelessrecommend.recommend`，属推荐流。与 §21.5 的 watchcat 0 匹配结论一致。
+3. **返回字段无法二次喂 CDN**：`PailitaoRecommendRespData.smali:27-37` 是空类，响应走 fastjson 弱解析；解析路径可见 `objectData → showCardInfo → title / priceShow`（`IrpV2Presenter.smali:6006-6050`），这是**商品卡片标题**，不是识别关键词。 feimagesearch 全量无 `catName` / `keyword` / `category` 字段常量。且必须先成功调 recommend 才能拿到 title，与免登录目标矛盾。
+
+**证据修正（避免误判）**：`scancode/common/mtop/request/PailitaoRecommendRequest.smali:64-67` 确实 `NEED_SESSION = 0x1`，但全工程检索显示**该类无任何外部引用（死代码）**；图搜主链路走 `ImageSearchMtopUtil` 直接构造 `MtopRequest`。因此 NEED_SESSION 只能作为「扫码入口曾设计为需登录」的旁证，**不是图搜主链路强制登录的决定性证据**。历史图搜回归 `regression_image_iphone.json` 实际卡点为 `ANDROID_SYS_GENERATE_MTOP_SIGN_ERROR`（签名生成错误），印证图搜当前瓶颈在 mtop 签名/bixi 而非 session 字段。
+
+**结论**：图片免登录没有可用的静态捷径，也没有「图→词→watchcat」的间接通路。可行路径仍只有：① 干净未 root 真机 + 官方 APK 原生栈低频调用；② 自持登录 Cookie；③ 官方开放平台 API。

@@ -5,18 +5,26 @@ set -e
 PROJ="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$PROJ"
 
-# 自动定位 JDK（环境里 JAVA_HOME 可能指向无效路径）
+# 自动定位 JDK（跨平台：JAVA_HOME > PATH > macOS java_home）
 JH=""
-for c in \
-  "/Users/liaozetao/Library/Java/JavaVirtualMachines/corretto-1.8.0_452/Contents/HOME" \
-  "$(/usr/libexec/java_home 2>/dev/null)"; do
-  [ -x "$c/bin/java" ] && JH="$c" && break
-done
-[ -z "$JH" ] && { echo "NO JDK FOUND"; exit 1; }
+if [ -n "${JAVA_HOME:-}" ] && [ -x "$JAVA_HOME/bin/java" ]; then
+  JH="$JAVA_HOME"
+else
+  JAVABIN="$(command -v java 2>/dev/null || true)"
+  if [ -n "$JAVABIN" ]; then
+    JH="$(dirname "$(dirname "$JAVABIN")")"
+  else
+    JH="$(/usr/libexec/java_home 2>/dev/null || true)"
+  fi
+fi
+[ -z "$JH" ] || [ ! -x "$JH/bin/java" ] && { echo "NO JDK FOUND"; exit 1; }
 
-CP="$PROJ/target/classes:$PROJ/target/test-classes:$(cat "$PROJ/target/cp.txt")"
+# classpath 分隔符：Windows(Git Bash/MINGW) 用 ';'，其余用 ':'
+SEP=":"
+case "$(uname -s 2>/dev/null)" in MINGW*|MSYS*|CYGWIN*) SEP=";" ;; esac
+CP="$PROJ/target/classes$SEP$PROJ/target/test-classes$SEP$(cat "$PROJ/target/cp.txt")"
 STAGE="${1:-onLoad}"
 BACKEND="${2:-unicorn}"
 exec "$JH/bin/java" -Xmx3g -cp "$CP" \
-  -Djna.tmpdir=/tmp/unidbg-jna \
+  -Djna.tmpdir="${TMPDIR:-/tmp}/unidbg-jna" \
   com.taobao.search.probe.SgProbe "$STAGE" "$BACKEND"
